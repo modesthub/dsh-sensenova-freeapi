@@ -1,0 +1,11 @@
+node_modules
+.tooling/
+.pnpm-store/
+.agent-relay/
+.mimosa/
+# npm 发布依赖 peerDependencies 范围，锁文件为本地安装残留不入库
+package-lock.json
+*.tsbuildinfo
+*.log
+.DS_Store
+debug_repro.mjs

@@ -1,0 +1,19 @@
+# dsh-sensenova-freeapi bundle patch
+#
+# 通过 `dsh plugin --profile <name> add dsh-sensenova-freeapi` 安装时,该声明会把
+# 本包追加进 dsh.profile.bundles,profile 启动时合并此 patch(单一 insert 行)。
+# `name` 必须是 scoped 全名(加载器按真实包名从 node_modules 解析),YAML 中以 @ 开头的
+# 标量必须加引号,否则解析失败。
+#
+# 可选行内 config(优先级低于 settings.yaml 的 llm-sensenova 段):
+#
+#   - insert:
+#       - id: llm-sensenova
+#         name: "dsh-sensenova-freeapi"
+#         config:
+#           apiKeyEnv: SENSENOVA_API_KEY
+- insert:
+    - id: llm-sensenova
+      name: "dsh-sensenova-freeapi"
+      config:
+        apiKeyEnv: SENSENOVA_API_KEY
