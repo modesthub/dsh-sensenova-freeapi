@@ -64,6 +64,8 @@ A1  B1  A2  B2  A3  B3  …（即 121212 交替）
 
 > 💡 **一句话结论**：日常/代码/Agent 用 `deepseek-v4-flash`；要读图用 `sensenova-6.8-flash-lite`；追求极限文本吞吐且不读图用 `glm-5.2`。**不要用 `deepseek-flash`（V4.1）**。
 
+> 🔭 **搭配推荐（视觉辅助）**：主模型用 `deepseek-v4-flash`（快且稳、成本低），图片识别交给视觉辅助插件 —— 安装 [`dsh-sensenova-vision-aid`](https://github.com/modesthub/dsh-sensenova-vision-aid) 后，收到图片识别请求会自动派生子 agent 切换到 SenseNova 视觉模型（`sensenova-6.8-flash-lite` → `deepseek-flash` → `kimi-k3` 故障转移），并**自动复用本插件同一把 key**（默认 `reuseFreeapiCredentials=true`，无需再配第二把 key）。**最合适的组合：`deepseek-v4-flash` 处理文本/代码/Agent + vision-aid 辅助视觉**，又快又好。
+
 ---
 
 ## 核心思想：把「限流」当作常态设计
@@ -141,7 +143,7 @@ SenseNova 渠道对单 key 存在 **TPM / RPM 并发与配额限制**，瞬时�
 dsh plugin --profile <name> add /path/to/dsh-sensenova-freeapi
 
 # GitHub 发布后
-dsh plugin --profile <name> add github:你的用户名/dsh-sensenova-freeapi
+dsh plugin --profile <name> add github:modesthub/dsh-sensenova-freeapi
 
 # 或 npm 发布后
 dsh plugin --profile <name> add dsh-sensenova-freeapi

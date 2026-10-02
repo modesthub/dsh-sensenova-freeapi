@@ -64,6 +64,8 @@ The following are taken from long-running measurements (2026-09), ordered by use
 
 > 💡 **Bottom line:** use `deepseek-v4-flash` for daily/code/agent work; `sensenova-6.8-flash-lite` when you need image understanding; `glm-5.2` for pure-text maximum throughput. **Avoid `deepseek-flash` (V4.1).**
 
+> 🔭 **Pairing recommendation (vision assist):** run the main model on `deepseek-v4-flash` (fast, stable, low-cost) and leave image recognition to the vision-assist plugin — install [`dsh-sensenova-vision-aid`](https://github.com/modesthub/dsh-sensenova-vision-aid), which spawns a child agent switched to the SenseNova vision model (`sensenova-6.8-flash-lite` → `deepseek-flash` → `kimi-k3` failover) and **reuses this plugin's key automatically** (default `reuseFreeapiCredentials=true`, no second key needed). **Best combination: `deepseek-v4-flash` for text/code/agent work + vision-aid for images — fast and reliable.**
+
 ---
 
 ## Core idea: design around throttling as a norm
@@ -141,7 +143,7 @@ None of the key parameters are guesses; they were **calibrated in long-running m
 dsh plugin --profile <name> add dsh-sensenova-freeapi
 
 # After publishing to GitHub
-dsh plugin --profile <name> add github:your-username/dsh-sensenova-freeapi
+dsh plugin --profile <name> add github:modesthub/dsh-sensenova-freeapi
 
 # After publishing to npm
 dsh plugin --profile <name> add dsh-sensenova-freeapi
