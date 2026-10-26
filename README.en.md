@@ -50,6 +50,18 @@ This naturally staggers every key so rotation never spins inside one account, gr
 
 - **Recommended setup: 4 accounts × 20 keys each** (SenseNova allows up to 20 keys per account).
 
+  Measured (2026-10 peak hour, 10 rounds):
+
+  | Keys in one account | Success rate | Expected time |
+  |---|---|---|
+  | 1 key | 30% | 27.9s |
+  | 5 keys | 40% | 27.1s |
+  | 10 keys | 40% | 27.8s |
+  | 15 keys | 70% | 21.9s |
+  | **20 keys** | **90%** | **17.2s** |
+
+  **The knee is at 15-20 keys**; 20 keys in one account ≈ 20 keys across accounts (90% vs 100%). With 20 keys per account, 4 accounts give 4 independent buckets × 20 chances — rarely failing even at peak.
+
 ### 5. Recommended models
 
 The following are taken from long-running measurements (2026-09), ordered by use case:
@@ -124,11 +136,16 @@ None of the key parameters are guesses; they were **calibrated in long-running m
 
 | Measured item | Conclusion | Basis |
 |---|---|---|
+| 429 order | **In-plugin retry once first, then switch keys** (deepseek-flash 15s / v4-flash 10s) | 6 forced-429 rounds: 100% vs 67% success, 27.9s vs 36.9s |
+| `quotaRotation` | **On** (key switching is a cheap lottery: 0.2s per key) | Same test: without it the host backs off 17s per retry, hitting 45-50s after two rounds |
+| Keys per account | 20 keys reach **90%** success (single key 30%); knee at 15-20 | 10 rounds × 5 levels, peak hour |
+| Pool capacity | **100** (fits 4 accounts × 20 keys) | 2026-10 expansion measurement |
+| Probe interval | **Fixed 3s** (`probeBackoffFactor=1`, no growth) | Tightened: recovers blocked keys faster |
+| Probe scheduling | At most 1 key probed per tick (avoid probe-induced bursts) | by design |
+| Dual-list state machine | Replaces the whole-pool-saturation positive-feedback deadlock | refactor |
+| Wrap-around rotation fix | After an exclusion, wrap from the next position | 9265 logged 429s |
 | Retry-After cap | raised to `60_000ms` (original 3000ms mismatched the TPM 60s window) | long-run |
-| Queue timeout | default 60s, aligned with the TPM window; queueing must be bounded | design D4/D6 |
-| Dual-list state machine | replaces the whole-pool-saturation positive-feedback deadlock | refactor |
-| Wrap-around rotation fix | after an exclusion, must wrap from the next position | 9265 logged 429s |
-| Probe interval | 15s start, ×2 backoff, 60s cap | measurement |
+| Queue timeout | default 60s, aligned with the TPM window | design D4/D6 |
 
 ---
 
