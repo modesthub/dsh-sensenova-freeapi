@@ -16,7 +16,8 @@ import assert from 'node:assert/strict';
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
 import { SensenovaAdapter, type SensenovaConnection } from '../src/adapter.ts';
 
-const CONNECTION: SensenovaConnection = { apiBase: 'https://example.invalid', accountCount: 1 };
+const CONNECTION: SensenovaConnection = { apiBase: 'https://example.invalid', accountCount: 1 , connectRetry: { maxRetries: 0 }
+};
 
 const SSE_OK = [
   'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}',

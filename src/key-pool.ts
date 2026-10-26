@@ -42,10 +42,10 @@ export interface KeyPoolParams {
 /** 池策略缺省值。 */
 export const DEFAULT_KEY_POOL_PARAMS: Readonly<KeyPoolParams> = Object.freeze({
   kickThreshold: 2,
-  probeInitialMs: 15_000,
-  probeBackoffFactor: 2,
-  probeMaxMs: 60_000,
-  capacity: 10,
+  probeInitialMs: 3_000,
+  probeBackoffFactor: 1,
+  probeMaxMs: 3_000,
+  capacity: 100,
 })
 
 /** 池内一把 key 的运行状态。 */

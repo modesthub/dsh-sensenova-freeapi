@@ -67,7 +67,7 @@ test('探测成功 ⇒ 挂回运行态末尾且计数清零', () => {
 
   const entry = pool.blockedEntries()[0]
   assert.ok(entry !== undefined, 'k1 应已进入阻塞态')
-  advance(15_000)
+  advance(3_000)
   pool.recordProbe(entry, true)
 
   const snap = pool.snapshot()
@@ -148,10 +148,11 @@ test('探测退避序列 = 15000 / 30000 / 60000 / 60000（封顶）', () => {
     advance(1_000)
     pool.recordProbe(entry, false)
   }
-  assert.deepEqual(observed, [15_000, 30_000, 60_000, 60_000])
+  // 2026-10-23：阻塞回归改为固定 3s 探测（factor=1）=> 间隔恒为 3s。
+  assert.deepEqual(observed, [3_000, 3_000, 3_000, 3_000])
 })
 
-test('nextProbeAt：踢出后首次探测在 probeInitialMs 之后，失败则递进', () => {
+test('nextProbeAt：固定 3s 探测，失败后仍是 3s（不再退避放大）', () => {
   const { pool, advance, at } = makePool()
   pool.seed(['k1', 'k2'])
   pool.recordTpmStrike('k1')
@@ -160,11 +161,11 @@ test('nextProbeAt：踢出后首次探测在 probeInitialMs 之后，失败则�
   const entry = pool.blockedEntries()[0]
   assert.ok(entry !== undefined)
   const kickedAt = at()
-  assert.equal(pool.nextProbeAt(entry), kickedAt + 15_000, '首次探测 15s 后')
+  assert.equal(pool.nextProbeAt(entry), kickedAt + 3_000, '首次探测 3s 后')
 
-  advance(15_000)
+  advance(3_000)
   pool.recordProbe(entry, false)
-  assert.equal(pool.nextProbeAt(entry), kickedAt + 15_000 + 30_000, '失败后 30s')
+  assert.equal(pool.nextProbeAt(entry), kickedAt + 3_000 + 3_000, '失败后仍是 3s')
 })
 
 test('seed 幂等（不重置相位）且按 capacity 截断', () => {

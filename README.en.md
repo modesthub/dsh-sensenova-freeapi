@@ -35,7 +35,7 @@ Open the console at [https://platform.sensenova.cn/console](https://platform.sen
 
 SenseNova limits are **account- / endpoint-scoped** — multiple keys inside the *same* account share a single quota bucket. So spreading keys across **≥ 2 accounts** is what actually bypasses the single-account bottleneck.
 
-- **2 accounts are enough for ordinary users**; add more only if you need higher throughput.
+- **Accounts are the key lever**: each account owns an independent quota bucket, so account count = bucket count. Measured: 4 accounts × 20 keys = 4 independent buckets × 20 draw chances, lifting the success rate from ~30% (single key) to ~100%.
 - This plugin's running/blocked dual-list + account rotation is built exactly for the multi-account case.
 
 ### 4. Enter API keys in alternating-account order
@@ -48,7 +48,7 @@ A1  B1  A2  B2  A3  B3  …  (i.e. 121212 alternating)
 
 This naturally staggers every key so rotation never spins inside one account, greatly lowering the chance of hitting a single account's ceiling.
 
-- Issue as many keys as you need; the open-source author runs **2 accounts × 10 API keys** (5 per account) for the best balance.
+- **Recommended setup: 4 accounts × 20 keys each** (SenseNova allows up to 20 keys per account).
 
 ### 5. Recommended models
 
@@ -86,11 +86,11 @@ Three non-negotiable properties (the essential difference from the legacy whole-
 2. **Borrow** — when running candidates are all excluded, borrow the *longest-blocked* key temporarily (**without changing its phase**).
 3. **Recovery decoupled from requests** — a blocked key's phase is decided **only by probe results**, never polluted by "zero success", so it can be revived at any time. **This is what roots out the old deadlock.**
 
-> Why probing must exist: agent requests only ever target running keys — a blocked key is never hit. Unless someone probes it, it can never recover. The scheduler probes once every `probeInitialMs` (default 15s, the same order as the request-bucket refill cycle) with a minimal request, and revives the key on success.
+> Why probing must exist: agent requests only ever target running keys — a blocked key is never hit. Unless someone probes it, it can never recover. The scheduler probes once every `probeInitialMs` (default 3s, the same order as the request-bucket refill cycle) with a minimal request, and revives the key on success.
 
 ---
 
-## Dual-account rotation
+## Multi-account rotation
 
 - Supports `1 default account + extra accounts` (`accounts[]`, each with its own `apiKeyEnv` credential ref), sharing one base URL.
 - Requests rotate in **alternating-account** order; a key excluded by `exclude` (401 or quota rotation) wraps around to **the next position**, avoiding the legacy "first-two ping-pong, key #3+ never used" bug.
@@ -117,7 +117,7 @@ None of the key parameters are guesses; they were **calibrated in long-running m
 
 ### 🧠 Dual-list key pool (running / blocked)
 - Pool-level singleton, shared across sessions: a key's quota is a global property and must not be session-isolated.
-- Consecutive-throttle kick-out, floor-never-empty, longest-blocked borrowing, probe recovery, 15/30/60s backoff — all configurable.
+- Consecutive-throttle kick-out, floor-never-empty, longest-blocked borrowing, probe recovery, fixed 3s probe — all configurable.
 - Each key's state (phase, strikes, blockedSince, probeAttempts) is read-only in the settings page.
 
 ### 🔄 Dual-account rotation
@@ -155,6 +155,28 @@ Then configure SenseNova on the **Models** page:
 
 ---
 
+
+## 429 handling pipeline (measured 2026-10)
+
+Order of operations on a 429:
+
+```
+HTTP 429
+  → in-plugin wait + retry (deepseek-flash 15s / v4-flash 10s, at most 1)
+      ├─ success → continue
+      └─ fail
+         → cross-account key rotation (0.1-0.2s each, covers independent buckets)
+             ├─ success → continue
+             └─ all fail → throw to host (backoff 15-19s + retry)
+```
+
+| Strategy | Expected time | Note |
+|---|---|---|
+| 15s in-plugin retry + key rotation | ~17s | 10-round peak-hour measurement |
+| Same-key hard wait 15s then retry | ~29s | host-retry cost eats the gain |
+
+---
+
 ## Configuration
 
 | Field | Type | Default | Description |
@@ -163,14 +185,16 @@ Then configure SenseNova on the **Models** page:
 | `apiKeyEnv` | credential-ref | `SENSENOVA_API_KEY` | credential ref for the default account |
 | `accounts[]` | array | `[]` | extra accounts: `{ id, label, apiKeyEnv }` |
 | `activeAccount` | string | `""` | preferred account id; empty = auto / first usable |
-| `quotaRotation` | bool | false | sticky key-switch on quota-429 |
+| `quotaRotation` | bool | true (recommended) | cross-account key switch on quota-429 (2026-10: rotation is "cheap lottery"; 20-key rotation succeeds ~90%, far better than hard waiting) |
 | `concurrency` | int | 1 | per-key concurrency gate (FIFO queue above) |
 | `queueTimeoutMs` | int | 60000 | queueing wait cap |
-| `poolPolicy.kickThreshold` | int | 2 | consecutive TPM throttles to kick out of running |
-| `poolPolicy.probeInitialMs` | int | 15000 | first probe interval |
-| `poolPolicy.probeBackoffFactor` | int | 2 | probe backoff multiplier |
-| `poolPolicy.probeMaxMs` | int | 60000 | probe interval cap |
-| `poolPolicy.capacity` | int | 10 | pool capacity cap |
+| `poolPolicy.kickThreshold` | int | 2 | TPM throttles before a key is kicked out of running |
+| `poolPolicy.probeInitialMs` | int | 3000 | probe a blocked key every 3s (2026-10: faster recovery) |
+| `poolPolicy.probeBackoffFactor` | int | 1 | probe backoff multiplier (1 = fixed interval) |
+| `poolPolicy.probeMaxMs` | int | 3000 | probe interval cap (fixed 3s) |
+| `poolPolicy.capacity` | int | 100 | pool capacity cap (100 slots = 4 accounts × 20 keys) |
+| `connectRetry.maxRetries` | int | 1 | in-plugin retries after a 429 (default 1; avoids host 16-19s backoff) |
+| `connectRetry.waitMs` | int | model-based | deepseek-flash 15s / deepseek-v4-flash 10s; `modelWaitMs` overrides |
 | `errorLog` | bool | true | whether to record throttle events |
 
 > API keys are always stored through the DSH credentials service — **never written to logs, never sent to the model**.

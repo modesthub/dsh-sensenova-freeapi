@@ -169,7 +169,7 @@ const DISPLAY_NAME_OVERRIDES: ReadonlyMap<string, string> = new Map([
  * |---|---|---|---|
  * | `sensenova-6.8-flash-lite` | `low medium high xhigh none` | `low medium max high` + none | **文档的 `max` 是错的（实测 400）**；`xhigh` 文档没提但可用 |
  * | `deepseek-v4-flash` | `low medium high xhigh none` | `low medium high max` + none | 同上 |
- * | `deepseek-flash`(v4.1) | 全 7 档均通过 | `none low high max` | 文档漏了 `medium`/`xhigh`/`minimal` |
+ * | `deepseek-flash`(v4.1) | 全 7 档均通过 | `none low high max` | **2026-10-25 按文档收敛为原生 4 档**（见下） |
  * | `glm-5.2` | 全 7 档均通过 | 全 7 档 | ✅ 一致 |
  * | `kimi-k3` | 全 7 档均通过 | `low medium high max` | 文档漏了 `minimal`/`xhigh`/`none` |
  *
@@ -182,11 +182,20 @@ const DISPLAY_NAME_OVERRIDES: ReadonlyMap<string, string> = new Map([
  *
  * 数组顺序 = UI 展示顺序。`none` 一律排首位，对齐官方 `llm-deepseek` 的
  * `Off / Low / High / Max` 范式（`packages/llm/llm-deepseek/src/model-info.ts:9-40`）。
+ *
+ * 🔴 **2026-10-25 修订（v4.1 收敛为原生档位）**：用户指出 v4.1 的 7 档"多出很多选项"。
+ * 官方文档（`10-model-deepseek-flash.md`）原文：**原生支持 `none`/`low`/`high`/`max`**，
+ * 其余为**兼容映射**（`minimal`→`low`，`medium`/`xhigh`→`high`，`ultra`→`max`）。
+ * 映射值虽被服务端接受（不 400），但**不产生独立效果** —— 在 UI 里并列展示会让用户
+ * 误以为有 7 档强度可调。现收敛为 4 个原生档，与文档一致。
+ *
+ * ⚠️ `deepseek-v4-flash`（V4）保持 5 档不变：文档写 `max`，但**服务端实测拒绝 `max`**、
+ * 只接受 `xhigh`（Phase 0 已锁定，测试 `tests/adapter.test.ts` 有护栏）。
  */
 export const KNOWN_EFFORTS: ReadonlyMap<string, readonly string[]> = new Map([
   ['sensenova-6.8-flash-lite', ['none', 'low', 'medium', 'high', 'xhigh']],
   ['deepseek-v4-flash', ['none', 'low', 'medium', 'high', 'xhigh']],
-  ['deepseek-flash', ['none', 'low', 'medium', 'high', 'xhigh', 'minimal', 'max']],
+  ['deepseek-flash', ['none', 'low', 'high', 'max']],
   ['deepseek-v4-pro', ['low', 'high', 'max']],
   ['glm-5.2', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']],
   ['kimi-k3', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']],
@@ -212,6 +221,30 @@ export interface SensenovaConnection {
   queueMs?: number;
   /** 配额类 429 粘性换 key 开关（默认关；开启后仅配额类 429 触发切换，design D5）。 */
   quotaRotation?: boolean;
+  /**
+   * 2026-10-23（方案2）：撞 429 后插件内原地等待重试的配置。
+   *
+   * 实测痛点：429 抛给宿主后触发 16~18s 指数退避空转（20 步任务 9 次重试，
+   * delayMs p50=16.7s）。本配置让插件先原地等 `waitMs` 再重试同一把 key
+   * （最多 `maxRetries` 次），成功则省掉一次宿主退避周期；用尽仍 429 才抛宿主。
+   *
+   * 默认开启（maxRetries **1**，2026-10-26 下调：3 次×20s=60s 的等待比宿主退避还长）；
+   * `waitMs` 按模型取 {@link MODEL_CONNECT_RETRY_WAIT_MS}
+   * （deepseek-flash 15s / deepseek-v4-flash 10s / 其他 10s），设置里显式配 `waitMs`
+   * 或 `modelWaitMs` 可覆盖；`maxRetries: 0` 关闭（行为与原版一致）。
+   *
+   * 2026-10-25 实测依据：
+   *  - 撞 429 后**立即重试**（0ms）成功率 2/5，**等 10s** 重试 3/3 → 2s 属"连击区"；
+   *  - deepseek-flash 大请求（24k tokens）TPM 恢复 >15s，15~90s 间隔成功率都约 50%；
+   *  - deepseek-v4-flash 配额宽松（单账户连发 4 个大请求全过），10s 足够。
+   */
+  connectRetry?: {
+    maxRetries?: number;
+    /** 全局缺省等待（毫秒）；未配 modelWaitMs 时作为兜底。 */
+    waitMs?: number;
+    /** 按模型 id 覆盖等待（毫秒），优先级高于 waitMs。 */
+    modelWaitMs?: Record<string, number>;
+  };
   /** 手动模型可选覆盖；缺省等价于空选择（自动过滤）。 */
   modelSelection?: ModelSelection;
   /**
@@ -1449,6 +1482,28 @@ function isTimeoutReason(value: unknown): value is Error {
   return value instanceof Error && value.name === 'TimeoutError';
 }
 
+/**
+ * 可中断 sleep（毫秒）：signal abort 时立即醒来。
+ * 2026-10-23 新增，供「429 插件内等待重试」使用（避免把退避抛给宿主触发 16~18s 空转）。
+ */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (ms <= 0 || signal?.aborted === true) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 /** 429 分类结果：配额类附带退避下限（毫秒）；非配额类下限为 undefined。 */
 export interface RateLimit429Classification {
   quota: boolean;
@@ -1618,6 +1673,22 @@ export function classify429Body(bodyText: string): RateLimit429Classification {
 
 /** 上抖幅度比例（base 的 0~30%）。 */
 const RETRY429_JITTER_RATIO = 0.3;
+
+/**
+ * 撞 429 后「插件内原地等待重试」的**按模型默认等待**（毫秒，2026-10-25 实测标定）。
+ *
+ * - `deepseek-flash`（V4.1）：大请求 24k tokens 受 TPM 严格限制，恢复 15~30s → 15s（1 次）
+ * - `deepseek-v4-flash`：配额宽松（单账户连发 4 个大请求全过），10s 足够
+ * - 其他：取 10s 保守值
+ *
+ * 覆盖顺序：connection.connectRetry.modelWaitMs[model] > connectRetry.waitMs > 本表 > 10000
+ */
+const MODEL_CONNECT_RETRY_WAIT_MS: Readonly<Record<string, number>> = Object.freeze({
+  'deepseek-flash': 15_000,
+  'deepseek-v4-flash': 10_000,
+});
+/** 未命中模型表时的兜底等待（毫秒）。 */
+const DEFAULT_CONNECT_RETRY_WAIT_MS = 10_000;
 
 /**
  * 429 退避的「基础值」计划（纯函数）。
@@ -1931,6 +2002,8 @@ export class SensenovaAdapter extends LlmAdapter {
     // agent 请求选中），而该状态可被探测主动解除 —— 不再有「一短路就出不来」的死锁。
     // W4：本轮内第几个 internal attempt（1 起，用于限流事件记录）。
     let attemptIndex = 0;
+    // 2026-10-23（方案2）：本请求内「429 内部等待重试」次数（独立于轮换，continue 不清零）。
+    let internalRetries = 0;
 
     try {
       for (let rotations = 0; ; ) {
@@ -2100,6 +2173,27 @@ export class SensenovaAdapter extends LlmAdapter {
             session: fingerprint(options.sessionId),
           });
         };
+        // 🔴 2026-10-26（重试顺序修正）：撞 429 后**先原地等待重试**，再考虑换 key。
+        //
+        // 依据（今日真实 429 日志）：rps/rpm 是**账户级共享桶**，换 key 不增加任何配额；
+        // 实测会话 a9ff64c7 一天刷出 1188 条 429，间隔 p50=0.13s、attempt 最高 23 ⇒ 全是
+        // 「撞 429 → 立刻换下一把 key → 又 429」的自造噪音。把等待重试提到轮换**之前**，
+        // 第一次 429 就等够时间再试，成功即止，不再空烧 20 把 key。
+        const cap = connection.connectRetry?.maxRetries ?? 1;
+        const waitBase =
+          connection.connectRetry?.modelWaitMs?.[options.model] ??
+          connection.connectRetry?.waitMs ??
+          MODEL_CONNECT_RETRY_WAIT_MS[options.model] ??
+          DEFAULT_CONNECT_RETRY_WAIT_MS;
+        if (attempt.status === 429 && internalRetries < cap && options.signal?.aborted !== true) {
+          internalRetries += 1;
+          // 释放并发额度再等：不占槽位（同 key 其他会话不被误排队）。
+          release?.();
+          release = undefined;
+          await abortableSleep(waitBase, options.signal);
+          continue;
+        }
+
         // 配额类 429 且开关开启：轮换到下一把本请求未试过的 key（tried 集合做单次
         // 请求内防乒乓——每次宿主重试都会清空 tried、重新探测各 key，因此配额恢复
         // 或另一把 key 空闲时下一次重试即可切过去；不再用跨请求环回 Set，那会把
@@ -2160,7 +2254,7 @@ export class SensenovaAdapter extends LlmAdapter {
           // 🔴 2026-09-27：原 `this.quotaSaturated.set(probeKey, ...)` 已随饱和机制移除 ——
           // 「哪些 key 暂不可用」现在由 key-pool 的运行态列表表达，且可被探测主动解除。
         }
-        release();
+        release?.();
         release = undefined;
         const failure = httpError(attempt.status, errText, retryAfterMs, dynamicFloorMs);
         // W4：记录的 providerRetryAfterMs 与真正抛给宿主的是同一个值（含单向上抖）。
@@ -2200,3 +2294,4 @@ export class SensenovaAdapter extends LlmAdapter {
     }
   }
 }
+

@@ -8,7 +8,8 @@ import {
 import { SensenovaAdapter, type SensenovaConnection } from '../src/adapter.ts';
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
 
-const CONNECTION: SensenovaConnection = { apiBase: 'https://example.invalid', accountCount: 1 };
+const CONNECTION: SensenovaConnection = { apiBase: 'https://example.invalid', accountCount: 1 , connectRetry: { maxRetries: 0 }
+};
 
 function sseResponse(sseText: string): Response {
   const stream = new ReadableStream<Uint8Array>({

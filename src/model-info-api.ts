@@ -127,7 +127,7 @@ const NOTES_V4 = [
 const NOTES_V41 = [
   '视觉实测通过：准确读出测试图中的红方块 / 蓝圆 / 数字 42。',
   '【实测】图片 token 在 ~1003 封顶（服务端自行缩放，与文件大小解耦）⇒ 图片预算可相对放宽。',
-  '【实测】全 7 档都接受（含 minimal/xhigh/max）；文档声称 medium/xhigh 会被映射到 high（未实测确认）。',
+  '【文档】原生档位 = none / low / high / max；minimal→low、medium/xhigh→high、ultra→max 属兼容映射（接受但不产生独立强度）⇒ 面板只列原生 4 档（2026-10-25 收敛）。',
   '目录 `input_modalities` 长期只报 ["text"] ⇒ 视觉能力由白名单硬补。',
   '【实测】`deepseek-v4.1-flash` 是 403 诱饵 id，唯一可调的是本 id。',
 ];
@@ -179,7 +179,7 @@ export const MODEL_FACT_SHEETS: readonly ModelFactSheet[] = [
     maxOutputTokens: MODEL_MAX_OUTPUT_OVERRIDES.get('deepseek-flash') ?? 131_072,
     vision: true,
     visionNote: '支持 JPEG/PNG/GIF/WebP；单图 ≤50MB（实测 8MB 即 413，文档口径不可信）；URL 与 Base64 均可。',
-    efforts: ['none', 'low', 'medium', 'high', 'xhigh', 'minimal', 'max'],
+    efforts: ['none', 'low', 'high', 'max'],
     blockedL2Params: [],
     notes: NOTES_V41,
   },

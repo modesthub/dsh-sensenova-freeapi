@@ -22,7 +22,8 @@ import {
 } from '../src/adapter.ts';
 import type { SenseNovaErrorLog, SenseNovaRateLimitEvent } from '../src/error-log.ts';
 
-const CONNECTION: SensenovaConnection = { apiBase: 'https://example.invalid', accountCount: 3 };
+const CONNECTION: SensenovaConnection = { apiBase: 'https://example.invalid', accountCount: 3 , connectRetry: { maxRetries: 0 }
+};
 
 const OPTIONS: GenerateOptions = { provider: 'sensenova', model: 'deepseek-flash', messages: [] };
 

@@ -233,10 +233,10 @@ const ConfigSchema = z.object({
   // 本插件支持的最大账户槽位数（多出的 key 被忽略并 warn 一次）。
   poolPolicy: z.object({
     kickThreshold: z.natural().min(1).max(10).default(DEFAULT_KEY_POOL_PARAMS.kickThreshold),
-    probeInitialMs: z.natural().min(5_000).max(300_000).default(DEFAULT_KEY_POOL_PARAMS.probeInitialMs),
+    probeInitialMs: z.natural().min(1_000).max(300_000).default(DEFAULT_KEY_POOL_PARAMS.probeInitialMs),
     probeBackoffFactor: z.number().min(1).max(10).default(DEFAULT_KEY_POOL_PARAMS.probeBackoffFactor),
-    probeMaxMs: z.natural().min(5_000).max(600_000).default(DEFAULT_KEY_POOL_PARAMS.probeMaxMs),
-    capacity: z.natural().min(1).max(10).default(DEFAULT_KEY_POOL_PARAMS.capacity),
+    probeMaxMs: z.natural().min(1_000).max(600_000).default(DEFAULT_KEY_POOL_PARAMS.probeMaxMs),
+    capacity: z.natural().min(1).max(100).default(DEFAULT_KEY_POOL_PARAMS.capacity),
   }).volatile(),
   // L2 连接级请求参数默认值（2026-09-23 新增）。
   //
@@ -381,17 +381,17 @@ function clampInt(value: unknown, min: number, max: number, fallback: number): n
  */
 export function normalizePoolPolicy(value: unknown): KeyPoolParams {
   const raw = (typeof value === 'object' && value !== null ? value : {}) as Partial<KeyPoolParams>;
-  const probeInitialMs = clampInt(raw.probeInitialMs, 5_000, 300_000, DEFAULT_KEY_POOL_PARAMS.probeInitialMs);
+  const probeInitialMs = clampInt(raw.probeInitialMs, 1_000, 300_000, DEFAULT_KEY_POOL_PARAMS.probeInitialMs);
   const backoff = typeof raw.probeBackoffFactor === 'number' && Number.isFinite(raw.probeBackoffFactor)
     ? raw.probeBackoffFactor
     : DEFAULT_KEY_POOL_PARAMS.probeBackoffFactor;
-  const probeMaxMs = clampInt(raw.probeMaxMs, 5_000, 600_000, DEFAULT_KEY_POOL_PARAMS.probeMaxMs);
+  const probeMaxMs = clampInt(raw.probeMaxMs, 1_000, 600_000, DEFAULT_KEY_POOL_PARAMS.probeMaxMs);
   return {
     kickThreshold: clampInt(raw.kickThreshold, 1, 10, DEFAULT_KEY_POOL_PARAMS.kickThreshold),
     probeInitialMs,
     probeBackoffFactor: backoff >= 1 && backoff <= 10 ? backoff : DEFAULT_KEY_POOL_PARAMS.probeBackoffFactor,
     probeMaxMs: Math.max(probeMaxMs, probeInitialMs),
-    capacity: clampInt(raw.capacity, 1, 10, DEFAULT_KEY_POOL_PARAMS.capacity),
+    capacity: clampInt(raw.capacity, 1, 100, DEFAULT_KEY_POOL_PARAMS.capacity),
   };
 }
 
@@ -932,7 +932,7 @@ export const PROBE_MODEL = 'deepseek-flash';
 export const PROBE_TIMEOUT_MS = 10_000;
 
 /** 探测定时器的粒度（毫秒）。取 5s 以尊重最短 15s 的探测间隔。 */
-export const PROBE_TICK_MS = 5_000;
+export const PROBE_TICK_MS = 3_000;
 
 export interface ProbeSchedulerDeps {
   /** 池：取阻塞态条目并回写探测结果。 */

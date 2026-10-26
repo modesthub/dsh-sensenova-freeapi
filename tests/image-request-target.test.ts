@@ -30,7 +30,8 @@ import {
   type SensenovaConnection,
 } from '../src/adapter.ts';
 
-const CONNECTION: SensenovaConnection = { apiBase: 'https://example.invalid', accountCount: 1 };
+const CONNECTION: SensenovaConnection = { apiBase: 'https://example.invalid', accountCount: 1 , connectRetry: { maxRetries: 0 }
+};
 
 // ── 复刻 harness 存储层的校验（attachment-local/src/request-image.ts:43-54）───────
 function checkedInteger(value: unknown, name: string): number {

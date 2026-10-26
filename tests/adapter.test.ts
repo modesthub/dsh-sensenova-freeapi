@@ -7,7 +7,12 @@ import { KeyedConcurrencyGate } from '../src/concurrency.ts';
 import { fingerprint, type SenseNovaErrorLog, type SenseNovaRateLimitEvent } from '../src/error-log.ts';
 import { resolveAdapterOptions } from '../src/index.ts';
 
-const CONNECTION: SensenovaConnection = { apiBase: 'https://example.invalid', accountCount: 2 };
+const CONNECTION: SensenovaConnection = {
+  apiBase: 'https://example.invalid',
+  accountCount: 2,
+  // 2026-10-23（方案2）：测试里关闭插件内 429 重试，保持既有断言（直接抛宿主）。
+  connectRetry: { maxRetries: 0 },
+};
 
 function sseResponse(sseText: string): Response {
   const stream = new ReadableStream<Uint8Array>({
@@ -743,7 +748,8 @@ test('resolveModel: 冷目录（entry 缺失）下静态表仍给出档位/预�
   assert.ok(info.reasoning, '冷目录下必须有档位');
   assert.deepEqual(
     info.reasoning.efforts.map((e) => e.id),
-    ['none', 'low', 'medium', 'high', 'xhigh', 'minimal', 'max'],
+    // 2026-10-25：按官方文档收敛为原生 4 档（minimal/medium/xhigh 是兼容映射，非独立档位）。
+    ['none', 'low', 'high', 'max'],
   );
   assert.equal(info.defaultMaxTokens, 131072);
   assert.equal(info.context?.contextWindow, 1048576);
@@ -793,7 +799,7 @@ test('resolveModel: 静态表覆盖多个模型族（Phase 0 实测值域）', a
   assert.deepEqual(glm.reasoning?.efforts.map((e) => e.id), ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
   // v4.1（deepseek-flash）：Phase 0 唯一新增条目，全 7 档实测通过。
   const v41 = await adapter.resolveModel('sensenova', 'deepseek-flash');
-  assert.deepEqual(v41.reasoning?.efforts.map((e) => e.id), ['none', 'low', 'medium', 'high', 'xhigh', 'minimal', 'max']);
+  assert.deepEqual(v41.reasoning?.efforts.map((e) => e.id), ['none', 'low', 'high', 'max'], '2026-10-25 按文档收敛为原生 4 档');
 });
 
 test('stream: delta.reasoning_content 与 delta.reasoning 都被映射为 reasoning 增量', async () => {
@@ -1604,4 +1610,99 @@ test('resolveAdapterOptions: queueTimeoutMs 缺省 60000，正值透传，非法
   assert.equal(resolveAdapterOptions({ queueTimeoutMs: -1 }).queueTimeoutMs, 60_000);
   assert.equal(resolveAdapterOptions({ queueTimeoutMs: Number.NaN }).queueTimeoutMs, 60_000);
   assert.equal(resolveAdapterOptions({ queueTimeoutMs: 2_500.7 }).queueTimeoutMs, 2_500);
+});
+
+// ── connectRetry 按模型等待（2026-10-25 实测标定）──────────────────────────
+
+test('connectRetry: modelWaitMs 按模型覆盖 waitMs，且 maxRetries 生效', async () => {
+  let calls = 0;
+  const adapter = new SensenovaAdapter({
+    options: () => ({
+      ...CONNECTION,
+      // 显式覆盖 CONNECTION 里关闭重试的默认值；modelWaitMs 应压过 waitMs。
+      connectRetry: { maxRetries: 2, waitMs: 500, modelWaitMs: { 'test-model': 40 } },
+    }),
+    resolveApiKey: async () => 'k1',
+    rotateApiKey: async () => undefined,
+    fetchImpl: (async () => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({ error: { code: 'RateLimitExceeded.EndpointTPMExceeded', message: 'tpm' } }),
+        { status: 429 },
+      );
+    }) as typeof fetch,
+  });
+  const t0 = Date.now();
+  await assert.rejects(collect(adapter, OPTIONS));
+  const elapsed = Date.now() - t0;
+  assert.equal(calls, 3, '1 次首发 + 2 次原地重试');
+  // 2 × 40ms = 80ms；远小于 waitMs 的 2 × 500ms ⇒ 证明 modelWaitMs 优先。
+  assert.ok(elapsed >= 60 && elapsed < 400, `应等待约 80ms（modelWaitMs 生效），实际 ${elapsed}ms`);
+});
+
+test('connectRetry: 未命中模型表时走 waitMs 兜底', async () => {
+  let calls = 0;
+  const adapter = new SensenovaAdapter({
+    options: () => ({
+      ...CONNECTION,
+      connectRetry: { maxRetries: 1, waitMs: 30 },
+    }),
+    resolveApiKey: async () => 'k1',
+    rotateApiKey: async () => undefined,
+    fetchImpl: (async () => {
+      calls += 1;
+      return new Response('rate limited', { status: 429 });
+    }) as typeof fetch,
+  });
+  const t0 = Date.now();
+  await assert.rejects(collect(adapter, OPTIONS));
+  const elapsed = Date.now() - t0;
+  assert.equal(calls, 2, '1 次首发 + 1 次重试');
+  assert.ok(elapsed >= 20 && elapsed < 300, `应等待约 30ms，实际 ${elapsed}ms`);
+});
+
+test('429 顺序：先原地重试（不换 key），重试耗尽后才换 key', async () => {
+  const seq: string[] = [];
+  let rotated = 0;
+  const adapter = new SensenovaAdapter({
+    options: () => ({
+      ...CONNECTION,
+      quotaRotation: true,
+      maxRotations: 10,
+      // 显式开启 2 次原地重试（等待压到 10ms 避免测试变慢）
+      connectRetry: { maxRetries: 2, modelWaitMs: { 'test-model': 10 } },
+    }),
+    resolveApiKey: async () => 'k1',
+    rotateApiKey: async () => { rotated += 1; return 'k2'; },
+    fetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const key = String((init?.headers as Record<string, string>).authorization).replace('Bearer ', '');
+      seq.push(key);
+      return new Response('rate limited', { status: 429 });
+    }) as typeof fetch,
+  });
+
+  await assert.rejects(collect(adapter, OPTIONS));
+
+  // 前 3 次 = 1 次首发 + 2 次原地重试，必须是**同一把 key**
+  assert.deepEqual(seq.slice(0, 3), ['k1', 'k1', 'k1'], '重试期间不换 key（共享桶换 key 无效）');
+  assert.ok(rotated >= 1, '重试耗尽后才发生换 key 轮换');
+});
+
+test('connectRetry: 未显式配 maxRetries 时默认只重试 1 次', async () => {
+  let calls = 0;
+  const adapter = new SensenovaAdapter({
+    options: () => ({
+      ...CONNECTION,
+      // 只覆盖等待（20ms），maxRetries 留空 ⇒ 走默认 1 次
+      connectRetry: { modelWaitMs: { 'test-model': 20 } },
+    }),
+    resolveApiKey: async () => 'k1',
+    rotateApiKey: async () => undefined,
+    fetchImpl: (async () => {
+      calls += 1;
+      return new Response('rate limited', { status: 429 });
+    }) as typeof fetch,
+  });
+  await assert.rejects(collect(adapter, OPTIONS));
+  assert.equal(calls, 2, '1 次首发 + 1 次默认原地重试');
 });

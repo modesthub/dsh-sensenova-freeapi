@@ -1,7 +1,6 @@
 import z from "@deepseek-ai/schemastery";
 import { GenerateOptions, LlmAdapter, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, ResolvedRetryPolicy, RetryPolicyConfig, StreamChunk } from "@deepseek-ai/dsh-llm";
 import { Context } from "@deepseek-ai/cordis";
-
 //#region src/concurrency.d.ts
 /**
  * 每 API key 的并发闸（host 侧，无依赖）。
@@ -177,6 +176,30 @@ interface SensenovaConnection {
   queueMs?: number;
   /** 配额类 429 粘性换 key 开关（默认关；开启后仅配额类 429 触发切换，design D5）。 */
   quotaRotation?: boolean;
+  /**
+   * 2026-10-23（方案2）：撞 429 后插件内原地等待重试的配置。
+   *
+   * 实测痛点：429 抛给宿主后触发 16~18s 指数退避空转（20 步任务 9 次重试，
+   * delayMs p50=16.7s）。本配置让插件先原地等 `waitMs` 再重试同一把 key
+   * （最多 `maxRetries` 次），成功则省掉一次宿主退避周期；用尽仍 429 才抛宿主。
+   *
+   * 默认开启（maxRetries **1**，2026-10-26 下调：3 次×20s=60s 的等待比宿主退避还长）；
+   * `waitMs` 按模型取 {@link MODEL_CONNECT_RETRY_WAIT_MS}
+   * （deepseek-flash 15s / deepseek-v4-flash 10s / 其他 10s），设置里显式配 `waitMs`
+   * 或 `modelWaitMs` 可覆盖；`maxRetries: 0` 关闭（行为与原版一致）。
+   *
+   * 2026-10-25 实测依据：
+   *  - 撞 429 后**立即重试**（0ms）成功率 2/5，**等 10s** 重试 3/3 → 2s 属"连击区"；
+   *  - deepseek-flash 大请求（24k tokens）TPM 恢复 >15s，15~90s 间隔成功率都约 50%；
+   *  - deepseek-v4-flash 配额宽松（单账户连发 4 个大请求全过），10s 足够。
+   */
+  connectRetry?: {
+    maxRetries?: number;
+    /** 全局缺省等待（毫秒）；未配 modelWaitMs 时作为兜底。 */
+    waitMs?: number;
+    /** 按模型 id 覆盖等待（毫秒），优先级高于 waitMs。 */
+    modelWaitMs?: Record<string, number>;
+  };
   /** 手动模型可选覆盖；缺省等价于空选择（自动过滤）。 */
   modelSelection?: ModelSelection;
   /**
@@ -224,7 +247,7 @@ interface SensenovaTimeouts {
  * 登记在此的模型：目录拉到后仍按目录声明走（含 image 时去重不重复加）；
  * 目录未加载时由本表保证能力不退化。
  */
-declare const DOCUMENTED_VISION_MODELS: Set<string>;
+export declare const DOCUMENTED_VISION_MODELS: Set<string>;
 /**
  * 文档确认**没有**视觉能力的模型（**不得**进入 `DOCUMENTED_VISION_MODELS`）。
  *
@@ -241,7 +264,7 @@ declare const DOCUMENTED_VISION_MODELS: Set<string>;
  * 本表**不参与能力上报**（不改变 `inputModalities`，那些模型仍是 `['text']`），
  * 仅供设置页「当前模型」面板显示警示文案，避免用户贴图后拿到幻觉答案却毫无报错。
  */
-declare const DOCUMENTED_TEXT_ONLY_MODELS: Set<string>;
+export declare const DOCUMENTED_TEXT_ONLY_MODELS: Set<string>;
 /** L2 参数的连接级取值（全部可选；未设置即不注入）。 */
 interface SensenovaRequestParams {
   /** 核采样阈值；思考模式下服务端会把 < 0.95 抬到 0.95，非思考模式固定 1.0 并被忽略。 */
@@ -351,7 +374,7 @@ interface SensenovaAdapterDeps {
   errorLog?: () => SenseNovaErrorLog | undefined;
 }
 /** SenseNova（OpenAI 兼容）适配器。 */
-declare class SensenovaAdapter extends LlmAdapter {
+export declare class SensenovaAdapter extends LlmAdapter {
   private readonly deps;
   private readonly fetchImpl;
   private readonly gate;
@@ -572,18 +595,18 @@ declare class SensenovaKeyPool {
 }
 //#endregion
 //#region src/index.d.ts
-declare const name = "llm-sensenova";
-declare const inject: string[];
-declare const DEFAULT_API_KEY_ENV = "SENSENOVA_API_KEY";
-declare const DEFAULT_API_BASE = "https://token.sensenova.cn/v1";
+export declare const name = "llm-sensenova";
+export declare const inject: string[];
+export declare const DEFAULT_API_KEY_ENV = "SENSENOVA_API_KEY";
+export declare const DEFAULT_API_BASE = "https://token.sensenova.cn/v1";
 /** 一个额外账户（settings 数组元素）。apiKeyEnv 为 credential-ref。 */
-interface SensenovaAccountConfig {
+export interface SensenovaAccountConfig {
   id?: string;
   label?: string;
   apiKeyEnv?: string;
 }
 /** 插件配置（schemastery schema 的输出形状，所有字段均可选）。 */
-interface SensenovaConfig {
+export interface SensenovaConfig {
   apiKeyEnv?: string;
   apiBase?: string;
   accounts?: SensenovaAccountConfig[];
@@ -669,7 +692,7 @@ interface SensenovaConfig {
  * `GET /api/sensenova/modelInfo` 的 `settingsProbe.namespacesSeen` 从 **0 → 1**，
  * 且 `accounts.slots` 仍为 **3**。
  */
-declare const Config: z<SensenovaConfig>;
+export declare const Config: z<SensenovaConfig>;
 /**
  * 把带 volatile 引用的配置解包成普通值（对齐官方 `llm-deepseek` 的 `plainOptions()`）。
  *
@@ -678,9 +701,9 @@ declare const Config: z<SensenovaConfig>;
  * @param config - `apply()` 收到的原始配置（字段可能是 volatile 引用）。
  * @returns 字段全部为普通值的配置，可直接交给 `resolveAdapterOptions()`。
  */
-declare function plainConfig(config: SensenovaConfig): SensenovaConfig;
+export declare function plainConfig(config: SensenovaConfig): SensenovaConfig;
 /** 一个解析后的账户槽位：id/label + 合法 credential-ref 名。 */
-interface ResolvedAccountSpec {
+export interface ResolvedAccountSpec {
   id: string;
   label: string;
   /** 合法 credential-ref 名；非法输入不会保留原文。 */
@@ -689,7 +712,7 @@ interface ResolvedAccountSpec {
   isLiteral: boolean;
 }
 /** resolveAdapterOptions 的输出：连接事实 + 账户槽位。 */
-interface ResolvedSensenovaOptions {
+export interface ResolvedSensenovaOptions {
   apiBase: string;
   activeAccount: string;
   accounts: ResolvedAccountSpec[];
@@ -714,9 +737,9 @@ interface ResolvedSensenovaOptions {
   modelSelection?: ModelSelection;
 }
 /** 把配置的并发上限归一化为正整数（非正整数/无法解析回退 1）。 */
-declare function normalizeConcurrency(value: unknown): number;
+export declare function normalizeConcurrency(value: unknown): number;
 /** 把配置的排队超时归一化为正整数毫秒；非法值回退 DEFAULT_QUEUE_TIMEOUT_MS。 */
-declare function normalizeQueueTimeout(value: unknown): number;
+export declare function normalizeQueueTimeout(value: unknown): number;
 /**
  * 归一化 key 池策略（2026-09-27 新增）。
  *
@@ -726,9 +749,9 @@ declare function normalizeQueueTimeout(value: unknown): number;
  * 额外维护一条不变量：`probeMaxMs >= probeInitialMs`。否则退避会「越等越短」，与
  * 探测退避的意图正好相反；违反时把 `probeMaxMs` 抬到 `probeInitialMs`。
  */
-declare function normalizePoolPolicy(value: unknown): KeyPoolParams;
+export declare function normalizePoolPolicy(value: unknown): KeyPoolParams;
 /** 规范化用户模型选择配置；未配置时保持 undefined，便于 settings unset。 */
-declare function normalizeModelSelection(selection: SensenovaConfig['modelSelection']): ModelSelection | undefined;
+export declare function normalizeModelSelection(selection: SensenovaConfig['modelSelection']): ModelSelection | undefined;
 /**
  * 把用户配置的 `retryPolicy` 与缺省值**逐层合并**（2026-09-17 W1）。
  *
@@ -743,21 +766,21 @@ declare function normalizeModelSelection(selection: SensenovaConfig['modelSelect
  * `maxRetries`/`retryableCodes`（后者明确注释为"切模式后保留的惰性字段"），
  * 因此合并出的对象无论走哪条分支都能通过 `validateKeys`。
  */
-declare function mergeRetryPolicy(config: RetryPolicyConfig | undefined): RetryPolicyConfig;
-declare function resolveAdapterOptions(config: SensenovaConfig): ResolvedSensenovaOptions;
-declare function apply(ctx: Context, config: SensenovaConfig): void;
+export declare function mergeRetryPolicy(config: RetryPolicyConfig | undefined): RetryPolicyConfig;
+export declare function resolveAdapterOptions(config: SensenovaConfig): ResolvedSensenovaOptions;
+export declare function apply(ctx: Context, config: SensenovaConfig): void;
 /**
  * 探测用的固定模型 id。
  *
  * 用 v4.1 的 `deepseek-flash`：它已实测可路由，且**限流是 key 级的**（与服务端用哪个
  * 模型无关）⇒ 用哪个模型探测结论都一样。固定常量最简单，也不依赖会话上下文。
  */
-declare const PROBE_MODEL = "deepseek-flash";
+export declare const PROBE_MODEL = "deepseek-flash";
 /** 单次探测的超时（毫秒）。故意短于生产建连超时：探测要的是快速结论，不是结果本身。 */
-declare const PROBE_TIMEOUT_MS = 10000;
+export declare const PROBE_TIMEOUT_MS = 10000;
 /** 探测定时器的粒度（毫秒）。取 5s 以尊重最短 15s 的探测间隔。 */
-declare const PROBE_TICK_MS = 5000;
-interface ProbeSchedulerDeps {
+export declare const PROBE_TICK_MS = 3000;
+export interface ProbeSchedulerDeps {
   /** 池：取阻塞态条目并回写探测结果。 */
   keyPool: SensenovaKeyPool;
   /** 并发闸 —— **必须与适配器是同一个实例**，否则避不开正在飞行的 agent 请求。 */
@@ -775,7 +798,7 @@ interface ProbeSchedulerDeps {
   /** 覆盖单次探测超时（测试用）。 */
   timeoutMs?: number;
 }
-interface ProbeScheduler {
+export interface ProbeScheduler {
   /**
    * 跑一次探测轮次：在**已到期**的阻塞态条目里，挑**第一把**能拿到并发额度的去探测。
    * 每轮**至多探测 1 把** —— 避免探测自身形成突发，反过来推高请求数限流。
@@ -794,7 +817,7 @@ interface ProbeScheduler {
  * 抽成工厂是为了**可测试**：单测直接调 `tick()`，不需要真实定时器，也不需要网络
  * （注入 `fetchImpl`）。`apply()` 只负责用 `ctx.effect` 包一层定时器。
  */
-declare function createProbeScheduler(deps: ProbeSchedulerDeps): ProbeScheduler;
+export declare function createProbeScheduler(deps: ProbeSchedulerDeps): ProbeScheduler;
 //#endregion
-export { Config, DEFAULT_API_BASE, DEFAULT_API_KEY_ENV, DOCUMENTED_TEXT_ONLY_MODELS, DOCUMENTED_VISION_MODELS, PROBE_MODEL, PROBE_TICK_MS, PROBE_TIMEOUT_MS, ProbeScheduler, ProbeSchedulerDeps, ResolvedAccountSpec, ResolvedSensenovaOptions, SensenovaAccountConfig, SensenovaAdapter, SensenovaConfig, apply, createProbeScheduler, inject, mergeRetryPolicy, name, normalizeConcurrency, normalizeModelSelection, normalizePoolPolicy, normalizeQueueTimeout, plainConfig, resolveAdapterOptions };
+export {};
 //# sourceMappingURL=index.d.ts.map

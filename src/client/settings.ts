@@ -534,10 +534,10 @@ export type PoolNumberField = keyof PoolPolicyDraft;
 /** 缺省草稿：与 host 侧 `DEFAULT_KEY_POOL_PARAMS` 数值一致。 */
 export const DEFAULT_POOL_DRAFT: PoolPolicyDraft = {
   kickThreshold: '2',
-  probeInitialMs: '15000',
-  probeBackoffFactor: '2',
-  probeMaxMs: '60000',
-  capacity: '10',
+  probeInitialMs: '3000',
+  probeBackoffFactor: '1',
+  probeMaxMs: '3000',
+  capacity: '100',
 };
 
 /** 从设置快照的 `poolPolicy` 读出草稿；缺失或非法时回退缺省。 */
@@ -560,14 +560,14 @@ export function normalizePoolPolicyDraft(raw: unknown): PoolPolicyDraft {
  * host 缺省（而不是保留用户此前的值），"改一项"就会意外重置其他项。
  */
 export function buildPoolPolicyPayload(draft: PoolPolicyDraft): Record<string, unknown> {
-  const probeInitialMs = Math.round(clampNumber(draft.probeInitialMs, 15_000, 5_000, 300_000));
+  const probeInitialMs = Math.round(clampNumber(draft.probeInitialMs, 3_000, 1_000, 300_000));
   return {
     kickThreshold: Math.round(clampNumber(draft.kickThreshold, 2, 1, 10)),
     probeInitialMs,
     probeBackoffFactor: clampNumber(draft.probeBackoffFactor, 2, 1, 10),
     // 与 host 的 `normalizePoolPolicy` 同向兜底：退避上限不得低于起手间隔。
-    probeMaxMs: Math.max(Math.round(clampNumber(draft.probeMaxMs, 60_000, 5_000, 600_000)), probeInitialMs),
-    capacity: Math.round(clampNumber(draft.capacity, 10, 1, 10)),
+    probeMaxMs: Math.max(Math.round(clampNumber(draft.probeMaxMs, 3_000, 1_000, 600_000)), probeInitialMs),
+    capacity: Math.round(clampNumber(draft.capacity, 100, 1, 100)),
   };
 }
 

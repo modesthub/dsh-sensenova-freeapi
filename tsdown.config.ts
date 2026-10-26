@@ -19,7 +19,10 @@ const lib = defineConfig({
   clean: true,
   sourcemap: true,
   dts: true,
-  outExtension: () => ({ js: '.js', dts: '.d.ts' }),
+  // 🔴 tsdown 0.23 把 outExtension（单数）改名为 outExtensions（复数）。
+  // 用旧名会静默失效 ⇒ ESM 产物落成 index.mjs/index.d.mts，而 package.json 的
+  // main/types/exports 全部指向 index.js/index.d.ts ⇒ 插件加载直接失败。
+  outExtensions: () => ({ js: '.js', dts: '.d.ts' }),
   external: [
     '@deepseek-ai/cordis',
     '@deepseek-ai/schemastery',

@@ -16,7 +16,8 @@ import { DEFAULT_KEY_POOL_PARAMS, SensenovaKeyPool, type KeyPoolParams } from '.
 import type { SenseNovaErrorLog, SenseNovaRateLimitEvent } from '../src/error-log.ts';
 import { createProbeScheduler } from '../src/index.ts';
 
-const CONNECTION: SensenovaConnection = { apiBase: 'https://example.invalid', accountCount: 3 };
+const CONNECTION: SensenovaConnection = { apiBase: 'https://example.invalid', accountCount: 3 , connectRetry: { maxRetries: 0 }
+};
 const OPTIONS: GenerateOptions = { provider: 'sensenova', model: 'deepseek-flash', messages: [] };
 
 /** 商汤 429 的统一样式：message 同时含 tpm 与 rpm，正则无法区分（这正是分类必须看 code 的原因）。 */
@@ -213,14 +214,14 @@ test('探测成功 ⇒ 该 key 挂回运行态末尾', async () => {
     timeoutMs: 100,
   });
 
-  clock += 15_000; // 让 k1 的首次探测到期
+  clock += 3_000; // 满 3s → k1 的首次探测到期
   assert.equal(await scheduler.tick(), true, '到期的 k1 应被探测');
   assert.equal(keyPool.isRunning('k1'), true, '探测成功 ⇒ 挂回运行态');
   assert.deepEqual(keyPool.snapshot().running, ['k3', 'k1'], '挂回**末尾**');
   assert.deepEqual(keyPool.snapshot().blocked.map(entry => entry.key), ['k2'], 'k2 仍在阻塞态');
 });
 
-test('探测未到期不探测；失败一次后退避到 30s', async () => {
+test('探测固定 3s：未到期不探测；失败后仍是 3s（不再退避放大）', async () => {
   let clock = 2_000_000;
   const now = (): number => clock;
   // ⚠️ 只用 2 把 key：阈值 1 ⇒ k1 进阻塞态、k2 保底留下。
@@ -229,7 +230,7 @@ test('探测未到期不探测；失败一次后退避到 30s', async () => {
   const { keyPool, gate, round } = wire({
     keys: ['k1', 'k2'],
     respond: () => tpm429(),
-    params: { kickThreshold: 1, probeInitialMs: 15_000 },
+    params: { kickThreshold: 1, probeInitialMs: 3_000 },
     now,
   });
   await round();
@@ -253,16 +254,16 @@ test('探测未到期不探测；失败一次后退避到 30s', async () => {
   assert.equal(await scheduler.tick(), false, '未到期 ⇒ 不发探测');
   assert.equal(probes, 0);
 
-  clock += 15_000;
+  clock += 3_000; // 满 3s → 到期探测
   assert.equal(await scheduler.tick(), true, '到期 ⇒ 探测一次');
   assert.equal(probes, 1);
 
   const entry = keyPool.blockedEntries()[0];
   assert.ok(entry !== undefined);
-  assert.equal(keyPool.probeIntervalMs(entry), 30_000, '失败一次 ⇒ 退避到 30s');
+  assert.equal(keyPool.probeIntervalMs(entry), 3_000, '失败后仍是 3s（固定）');
 
-  clock += 10_000;
-  assert.equal(await scheduler.tick(), false, '退避期内不探测');
+  clock += 2_000; // 1s 后仍未到期（固定 3s 探测）
+  assert.equal(await scheduler.tick(), false, '未到期不探测');
   assert.equal(probes, 1, '没有多余请求');
 });
 
@@ -273,7 +274,7 @@ test('探测时该 key 上有 agent 请求在飞 ⇒ 跳过本次（避免结论
   const { keyPool, gate, round } = wire({
     keys: ['k1', 'k2'],
     respond: () => tpm429(),
-    params: { kickThreshold: 1, probeInitialMs: 15_000 },
+    params: { kickThreshold: 1, probeInitialMs: 3_000 },
     now,
   });
   await round();
@@ -301,7 +302,7 @@ test('探测时该 key 上有 agent 请求在飞 ⇒ 跳过本次（避免结论
     timeoutMs: 100,
   });
 
-  clock += 15_000;
+  clock += 3_000; // 满 3s → 探测到期，但 key 被占用
   assert.equal(await scheduler.tick(), false, '该 key 被占用 ⇒ 跳过');
   assert.equal(probes, 0, '没有发出探测请求');
 
