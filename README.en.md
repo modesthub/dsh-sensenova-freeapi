@@ -99,13 +99,14 @@ Three non-negotiable properties (the essential difference from the legacy whole-
 3. **Borrow from blocked** — when all running candidates are excluded, borrow the *longest-blocked* key temporarily (**without changing its phase**), so a round can still try every key.
 4. **Throw to host** — only when every key fails (exponential backoff 15-19s, up to 24 retries).
 
+**Measured comparison (6 forced-429 rounds, deepseek-flash / 80 keys / 24k tokens)**
 
-**Measured comparison (why not hard-wait)**
+| Strategy | Success | Avg time (success) | Range |
+|---|---|---|---|
+| **`quotaRotation=true`** (15s retry, then key rotation) | **6/6 (100%)** | **27.9s** | **25.9-28.7s** |
+| `quotaRotation=false` (15s retry, no key switch) | 4/6 (67%) | 36.9s | 27.4-46.4s (2 failures at 50s) |
 
-| Strategy | Expected time | Note |
-|---|---|---|
-| 15s in-plugin retry + key rotation | ~17s | 10-round peak-hour measurement |
-| Same-key hard wait 15s then retry | ~29s | host-retry cost eats the gain |
+> Why rotation is faster: a key switch costs **0.2s each** (2-4 keys usually hit), while host backoff costs **17s per retry**. Even with more 429s, rotation stays at "15s wait + 12-15s generation" ≈ 28s; without rotation you can only wait for host backoff — two retries already cost 45-50s, or fail outright.
 
 **States and throttle classification**:
 
