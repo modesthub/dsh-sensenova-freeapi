@@ -71,8 +71,10 @@ export interface SenseNovaSectionProps {
   editKeysIoText: (text: string) => void;
   /** Key 导入 / 导出：导出全部 key（host 只读路由返回明文）。 */
   exportKeys: () => void;
-  /** Key 导入 / 导出：导入文本框里的 key。 */
+  /** Key 导入 / 导出：导入文本框里的 key（写草稿，需点保存）。 */
   importKeys: () => void;
+  /** 顶部「刷新」：重查凭据状态（兜底手动刷新，v0.2.4）。 */
+  refreshCredentials: () => void;
   /** 重试策略：模式单选（W1 2026-09-17）。 */
   setRetryMode: (mode: 'normal' | 'always') => void;
   /** 重试策略：数字字段编辑。 */
@@ -994,7 +996,17 @@ export function SenseNovaSection(props: SenseNovaSectionProps): JSX.Element {
 
   return (
     <section className="sn-section" aria-label={t('title')}>
-      <h2 className="sn-title">{t('title')}</h2>
+      <div className="sn-titleRow">
+        <h2 className="sn-title">{t('title')}</h2>
+        <button
+          type="button"
+          className="sn-btnGhost"
+          disabled={state.saving}
+          onClick={props.refreshCredentials}
+        >
+          {t('refresh')}
+        </button>
+      </div>
       <p className="sn-intro">{t('intro')}</p>
       {!state.writable ? (
         <p className="sn-readOnly" role="status">

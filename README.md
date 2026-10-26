@@ -8,7 +8,7 @@ dsh-sensenova-freeapi 是一个非官方的 **DeepSeek Harness**（DSH）LLM 提
   <img src="./docs/lockup.png" alt="DeepSeek Harness × SenseNova" width="720">
 </p>
 
-![release](https://img.shields.io/badge/status-0.2.3-3fb950)
+![release](https://img.shields.io/badge/status-0.2.4-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 > 参考实现：[`@mars-sea/dsh-commandcode-provider`](https://github.com/Mars-Sea/dsh-commandcode-provider)（MIT）。本插件只保留多账户连接能力；登录流程、用量面板、套餐窗口、命令行工具均已裁剪。
@@ -175,7 +175,7 @@ SenseNova 渠道对单 key 存在 **TPM / RPM 并发与配额限制**，瞬时�
 
 ### 🔑 Key 导入 / 导出（v0.2.1）
 - **导出**：一键拉取全部账户（含默认账户）的密钥，按 `账户N` 分节写到文本框，纯本机操作、不上传。
-- **导入**：粘贴「`账户N` + `序号:密钥`」分块或「`标签:密钥`」单行，自动匹配已有账户（标签相同则覆盖密钥），其余分配新 ref 并新增账户。
+- **导入**：粘贴「`账户N` + `序号:密钥`」分块或「`标签:密钥`」单行 → **只写草稿**（保存按钮亮起），点「保存」后才写凭据并更新账户；标签相同的账户直接覆盖密钥。
 - 导出走 host 只读路由 `GET /api/sensenova/keysExport`（客户端读不到明文，必须由宿主 `credentials.resolve` 解析）；导入直接写凭据域并更新 `accounts`。
 ## 导入 / 导出 Key（v0.2.1）
 
@@ -193,6 +193,8 @@ Default:sk-...
 ```
 
 **导入**：把上述文本（或你自己整理的「账户N / 序号:密钥」「标签:密钥」）粘进文本框，点「导入到账户」：
+导入**只写草稿**，页面底部「**保存**」按钮会亮起 —— 点它才真正写凭据并更新账户列表（`accounts`）。
+
 
 - 标签与已有账户相同 → 覆盖该账户的密钥（不改账户结构）
 - 新标签 → 从 `SENSENOVA_API_KEY_2` 起分配新 credential-ref 并追加账户
@@ -203,7 +205,11 @@ Default:sk-...
 
 > 🛠️ **v0.2.2 修复**：导入新账户时不再误报「写入失败」——旧版按 `describe` 回读判定，而新 ref 尚未进入设置快照；现在以 `credentials.set` 的返回值为准，并在账户落盘后统一刷新状态。
 
+> 🔄 **顶部「刷新」按钮**：手动重查全部账户的凭据状态（兜底；正常情况状态会自动刷新）。
+
 > 🛠️ **v0.2.3 修复**：批量导入导致界面卡死——宿主的 `credentials/reference-updated` 是逐条广播，旧代码每写一把 key 就全量 `describe` 一次（80 把 = 80 次全量查询）。现在事件入口改为 **200ms 防抖**，导入循环内直接**挂起**刷新，结束后只查一次；同时新增「设置尚未就绪」守卫，避免快照未就绪时写 `accounts` 抹掉既有账户。
+
+> 🛠️ **v0.2.4 修复**：① 80+ 账户时凭据状态查询改为**分批（每批 25 个）**——旧版一次 describe 全部 ref 会被拒绝/超时，表现为「80 个账户 · 0 个已配置」；② 导入改为**草稿流程**（导入后亮保存按钮，保存才生效）；③ 顶部新增**手动刷新**按钮。
 
 ---
 

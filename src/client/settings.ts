@@ -808,6 +808,14 @@ export function createSnapshotStore<T>(initial: T): SnapshotStore<T> {
   };
 }
 
+/**
+ * 凭据状态查询的单批 refs 上限（v0.2.4）。
+ *
+ * 一次性 describe 80+ 个 ref 会被 remote 拒绝或超时，整批失败的表现就是
+ * 「所有账户都显示未配置」。分批查询 + 部分成功也计入，可显著提升大账户集的可用性。
+ */
+const CREDENTIAL_DESCRIBE_BATCH = 25;
+
 /** 与宿主 credentials 的 canonical credential-ref 规则一致（POSIX shell 标识符）。 */
 const CREDENTIAL_REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -1109,7 +1117,12 @@ export class SenseNovaSettingsController {
     this.publish();
   }
 
-  addAccount(): void {
+  /**
+   * 计算下一个可用的账户草稿槽位（id + credential-ref），不落库（v0.2.4）。
+   *
+   * 供「添加账户」与「导入」共用，保证两者分配出的 id / ref 不会撞车。
+   */
+  private nextAccountSlot(): { id: string; apiKeyEnv: string; index: number } {
     const usedRefs = new Set<string>([
       ...(this.credentialRef() !== undefined ? [this.credentialRef() as string] : []),
       ...this.storedAccounts().map((a) => a.apiKeyEnv),
@@ -1126,8 +1139,12 @@ export class SenseNovaSettingsController {
       k += 1;
       id = `account-${k}`;
     }
+    return { id, apiKeyEnv, index: k };
+  }
 
-    this.addedAccounts.push({ id, label: `账户 ${k}`, apiKeyEnv });
+  addAccount(): void {
+    const slot = this.nextAccountSlot();
+    this.addedAccounts.push({ id: slot.id, label: `账户 ${slot.index}`, apiKeyEnv: slot.apiKeyEnv });
     this.failed = false;
     void this.describeAll();
     this.publish();
@@ -1348,27 +1365,32 @@ export class SenseNovaSettingsController {
       this.describedRefsKey = '';
       return;
     }
-    let response: CredentialsDescribeResult;
-    try {
-      response = await this.credentials.describe(refs);
-    } catch {
-      return;
-    }
-    if (!response.ok) return;
-    this.describedRefsKey = this.currentRefsKey();
     let changed = false;
-    for (const ref of refs) {
-      const view = response.value?.[ref];
-      const next: CredentialView = {
-        configured: view?.configured ?? false,
-        writable: view?.writable ?? true,
-      };
-      const prev = this.credentialStates.get(ref);
-      if (prev === undefined || prev.configured !== next.configured || prev.writable !== next.writable) {
-        this.credentialStates.set(ref, next);
-        changed = true;
+    let anyOk = false;
+    for (let start = 0; start < refs.length; start += CREDENTIAL_DESCRIBE_BATCH) {
+      const batch = refs.slice(start, start + CREDENTIAL_DESCRIBE_BATCH);
+      let response: CredentialsDescribeResult;
+      try {
+        response = await this.credentials.describe(batch);
+      } catch {
+        continue;
+      }
+      if (!response.ok) continue;
+      anyOk = true;
+      for (const ref of batch) {
+        const view = response.value?.[ref];
+        const next: CredentialView = {
+          configured: view?.configured ?? false,
+          writable: view?.writable ?? true,
+        };
+        const prev = this.credentialStates.get(ref);
+        if (prev === undefined || prev.configured !== next.configured || prev.writable !== next.writable) {
+          this.credentialStates.set(ref, next);
+          changed = true;
+        }
       }
     }
+    if (anyOk) this.describedRefsKey = this.currentRefsKey();
     if (changed) this.publish();
   }
 
@@ -1384,24 +1406,6 @@ export class SenseNovaSettingsController {
     }
     await this.describeAll();
     return this.credentialStates.get(canonicalRef)?.configured ?? false;
-  }
-
-  /**
-   * 只写凭据、不等待 describe 回读（v0.2.1 导入专用）。
-   *
-   * 导入会新建账户（ref 尚未进 section），此时 describeAll 的 refs 集合里还没有它，
-   * 用 writeKeyTo 的回读判定会误报失败。导入以 credentials.set 的 ok 为准，
-   * 等 accounts 落盘后再统一 describeAll（带 extraRefs）。
-   */
-  private async writeKeyRaw(ref: string, value: string): Promise<{ ok: boolean; error?: string }> {
-    const canonicalRef = canonicalCredentialRef(ref);
-    if (canonicalRef === undefined) return { ok: false, error: '非法的 credential-ref' };
-    try {
-      const result = await this.credentials.set(canonicalRef, value);
-      return result.ok ? { ok: true } : { ok: false, error: String(result.error ?? '凭据写入被拒绝') };
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
-    }
   }
 
   private async unsetKey(ref: string): Promise<boolean> {
@@ -1574,12 +1578,15 @@ export class SenseNovaSettingsController {
     }
     this.publish();
   }
-
   /**
-   * 导入文本框里的 key。
+   * 导入文本框里的 key —— **只写草稿，不直接落库**（v0.2.4）。
    *
-   * 匹配规则：label 与已有账户相同时复用其 credential-ref；否则从
-   * `SENSENOVA_API_KEY_2` 起分配新 ref 并追加账户；`Default` / `1-0` 写入默认账户。
+   * 用户点「保存」后才由 `save()` 统一写凭据与 accounts：
+   *  1. 导入后保存按钮亮起（dirty=true），符合「改完再存」的直觉；
+   *  2. 保存失败不会留下半套配置。
+   *
+   * 匹配规则：label 与已保存/已草稿账户相同 → 填它的 key 草稿；
+   * `Default` / `1-0` → 填默认账户；其它 label → 新增草稿账户。
    */
   async importKeys(): Promise<void> {
     if (this.keysIo.busy) return;
@@ -1589,84 +1596,48 @@ export class SenseNovaSettingsController {
       this.publish();
       return;
     }
-    // 就绪守卫（v0.2.3）：快照未就绪时 `storedAccounts()` 为空，此时写 accounts
-    // 会把既有账户整表抹掉 —— 宁可不导入，也不能丢配置。
+    // 就绪守卫：快照未就绪时 storedAccounts() 为空，后续保存会抹掉既有账户。
     if (this.scope.getSnapshot().status !== 'ready') {
-      this.keysIo = {
-        ...this.keysIo,
-        busy: false,
-        message: '',
-        error: '设置尚未加载完成，请稍候重试导入',
-      };
+      this.keysIo = { ...this.keysIo, message: '', error: '设置尚未加载完成，请稍候重试导入' };
       this.publish();
       return;
     }
-    this.keysIo = { ...this.keysIo, busy: true, message: '', error: '' };
-    this.publish();
     const errors = [...parsed.errors];
-    const writtenRefs: string[] = [];
-    let imported = 0;
-    // 挂起逐条凭据刷新：80 把 key 会连发 80 次 reference-updated，
-    // 逐次全量 describe 会把 UI 拖死（v0.2.3）。
-    this.suspendCredentialRefresh += 1;
-    try {
-      const defaultRef = this.credentialRef() ?? DEFAULT_API_KEY_ENV;
-      const existing = this.effectiveAccounts().map((a) => ({ label: a.label, ref: a.ref }));
-      const used = new Set<string>([defaultRef, ...existing.map((a) => a.ref)]);
-      const added: AccountConfig[] = [];
-      let nextNum = 2;
-      for (const entry of parsed.entries) {
-        const isDefault = entry.label === 'Default' || entry.label === '1-0';
-        let ref = defaultRef;
-        if (!isDefault) {
-          const existingHit = existing.find((a) => a.label === entry.label);
-          const addedHit = added.find((a) => a.label === entry.label);
-          if (existingHit !== undefined) {
-            ref = existingHit.ref;
-          } else if (addedHit !== undefined) {
-            ref = addedHit.apiKeyEnv;
-          } else {
-            while (used.has(`SENSENOVA_API_KEY_${nextNum}`)) nextNum += 1;
-            ref = `SENSENOVA_API_KEY_${nextNum}`;
-            nextNum += 1;
-            used.add(ref);
-            added.push({ id: ref, label: entry.label, apiKeyEnv: ref });
-          }
-        }
-        const written = await this.writeKeyRaw(ref, entry.key);
-        if (written.ok) {
-          imported += 1;
-          writtenRefs.push(ref);
-        } else {
-          errors.push(`${entry.label}: ${written.error ?? '写入失败'}`);
-        }
+    let staged = 0;
+    // 逐条只改内存草稿，最后统一 publish（避免 80 条导入触发 80 次渲染）。
+    for (const entry of parsed.entries) {
+      if (entry.label === 'Default' || entry.label === '1-0') {
+        this.defaultKeyDraft = entry.key;
+        this.defaultClearStaged = false;
+        staged += 1;
+        continue;
       }
-      if (added.length > 0) {
-        const list: AccountConfig[] = [
-          ...this.storedAccounts().map((a) => ({ id: a.id, label: a.label, apiKeyEnv: a.apiKeyEnv })),
-          ...added,
-        ];
-        await this.scope.set('accounts', list);
+      const stored = this.storedAccounts().find((a) => a.label === entry.label);
+      if (stored !== undefined) {
+        this.keyDrafts.set(stored.id, entry.key);
+        this.keyClears.delete(stored.id);
+        staged += 1;
+        continue;
       }
-      // 新账户的 ref 此时已随 accounts 落盘；额外带上本次写入的 ref，
-      // 保证「已配置」徽标立即正确（不依赖快照订阅的下一次刷新）。
-      await this.describeAll(writtenRefs);
-      this.keysIo = {
-        ...this.keysIo,
-        busy: false,
-        message: `已导入 ${imported} 把 key（已直接生效，无需保存）${errors.length > 0 ? `（${errors.length} 条提示）` : ''}`,
-        error: errors.length > 0 ? errors.slice(0, 5).join('；') : '',
-      };
-    } catch (error) {
-      this.keysIo = {
-        ...this.keysIo,
-        busy: false,
-        message: '',
-        error: error instanceof Error ? error.message : '导入失败',
-      };
-    } finally {
-      this.suspendCredentialRefresh = Math.max(0, this.suspendCredentialRefresh - 1);
+      const added = this.addedAccounts.find((a) => a.label === entry.label);
+      if (added !== undefined) {
+        this.keyDrafts.set(added.id, entry.key);
+        this.keyClears.delete(added.id);
+        staged += 1;
+        continue;
+      }
+      const slot = this.nextAccountSlot();
+      this.addedAccounts.push({ id: slot.id, label: entry.label, apiKeyEnv: slot.apiKeyEnv });
+      this.keyDrafts.set(slot.id, entry.key);
+      staged += 1;
     }
+    this.failed = false;
+    this.keysIo = {
+      ...this.keysIo,
+      busy: false,
+      message: `已导入 ${staged} 条草稿 — 点「保存」写入并生效`,
+      error: errors.length > 0 ? errors.slice(0, 5).join('；') : '',
+    };
     this.publish();
   }
 

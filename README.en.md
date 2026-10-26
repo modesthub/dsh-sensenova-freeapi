@@ -8,7 +8,7 @@ dsh-sensenova-freeapi is an unofficial **DeepSeek Harness** (DSH) LLM provider p
   <img src="./docs/lockup.png" alt="DeepSeek Harness × SenseNova" width="720">
 </p>
 
-![release](https://img.shields.io/badge/status-0.2.3-3fb950)
+![release](https://img.shields.io/badge/status-0.2.4-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 > Reference implementation: [`@mars-sea/dsh-commandcode-provider`](https://github.com/Mars-Sea/dsh-commandcode-provider) (MIT). This plugin keeps only the multi-account connectivity; the login flow, usage dashboard, plan window, and CLI tooling are all trimmed away.
@@ -175,7 +175,7 @@ None of the key parameters are guesses; they were **calibrated in long-running m
 
 ### 🔑 Key import / export (v0.2.1)
 - **Export**: pull every account key (default included) into the text box in `account N` groups — local only, never uploaded.
-- **Import**: paste `account N + index:key` groups or single `label:key` lines; matching labels overwrite the account key, new labels get a fresh credential ref and a new account.
+- **Import**: paste `account N + index:key` groups or single `label:key` lines → **staged as a draft** (the Save button lights up); press Save to actually write the credentials and update accounts. A label matching an existing account overwrites that key.
 - Export goes through the host-only route `GET /api/sensenova/keysExport` (the client never sees plaintext); import writes the credentials store and updates `accounts` directly.
 ## Key import / export (v0.2.1)
 
@@ -193,6 +193,8 @@ Default:sk-...
 ```
 
 **Import** — paste that text (or your own `account N / index:key` or `label:key` lines) and click “Import into accounts”:
+Import **only stages a draft** — the page-level **Save** button lights up; pressing it writes the credentials and updates the account list (`accounts`).
+
 
 - a label matching an existing account overwrites that key (structure unchanged)
 - a new label allocates a fresh `SENSENOVA_API_KEY_N` ref and appends an account
@@ -203,7 +205,11 @@ Default:sk-...
 
 > 🛠️ **Fixed in v0.2.2**: importing new accounts no longer reports a false “write failed” — the old code judged by a `describe` round-trip before the new ref existed in the settings snapshot. It now trusts `credentials.set` and refreshes state once accounts are persisted.
 
+> 🔄 **Top “Refresh” button**: re-query every account's credential state manually (a fallback; normally state refreshes automatically).
+
 > 🛠️ **Fixed in v0.2.3**: bulk import no longer freezes the page — the host broadcasts `credentials/reference-updated` per key, and the old code re-described **all** refs after every write (80 keys → 80 full queries). Event handling is now debounced to 200 ms, the import loop suspends refreshes entirely and does a single describe at the end, and a “settings not ready” guard prevents an import from overwriting the existing account list.
+
+> 🛠️ **Fixed in v0.2.4**: (1) credential-state queries are now **batched (25 refs per call)** — describing 80+ refs in one go was rejected/timed out, which surfaced as “80 accounts · 0 configured”; (2) import is now a **draft flow** (Save button lights up, nothing is written until you save); (3) a manual **Refresh** button was added at the top.
 
 ---
 
