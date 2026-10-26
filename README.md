@@ -23,7 +23,7 @@ dsh-sensenova-freeapi 是一个非官方的 **DeepSeek Harness**（DSH）LLM 提
 
 ### 2. 在控制台申请多个 API Key
 
-进入控制台 [https://platform.sensenova.cn/console](https://platform.sensenova.cn/console)，在「API Key 管理」中创建密钥。每个 API Key 对应一次限流额度，多申请几把即可显著提升吞吐。
+进入控制台 [https://platform.sensenova.cn/console](https://platform.sensenova.cn/console)，在「API Key 管理」中创建密钥。**每个账户最多可申请 20 把 Key**。注意额度是按**账户**计量的（同一账户内多把 Key 共享一个桶），但同账户内多把 Key 能显著提升「抽签次数」——实测同账户 20 把成功率约 90%，单把只有 30%。
 
 > 📷 账户配置界面示意（控制台申请多个 API Key 的位置）：
 
@@ -31,7 +31,7 @@ dsh-sensenova-freeapi 是一个非官方的 **DeepSeek Harness**（DSH）LLM 提
   <img src="./docs/account-config-screenshot.png" alt="SenseNova 账户配置界面示意图" width="720">
 </p>
 
-### 3. 建议注册 ≥ 2 个账户
+### 3. 建议注册多个账户（推荐 4 个）
 
 SenseNova 的限流额度是**账户级 / 端点级**的（同一账户内多把 Key 共享同一个额度桶），因此**把 API Key 分散到 ≥ 2 个账户**才能绕开单账户瓶颈。
 

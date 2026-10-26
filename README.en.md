@@ -23,7 +23,7 @@ Sign up and log in at [https://platform.sensenova.cn/login](https://platform.sen
 
 ### 2. Issue multiple API keys from the console
 
-Open the console at [https://platform.sensenova.cn/console](https://platform.sensenova.cn/console), then create keys under **API Key management**. Each API key carries its own rate-limit allowance, so issuing several keys raises your throughput considerably.
+Open the console at [https://platform.sensenova.cn/console](https://platform.sensenova.cn/console), then create keys under **API Key management**. **Each account allows up to 20 keys.** Note that the allowance is metered **per account** (all keys in one account share a single bucket), but multiple keys in the same account significantly raise the number of "draws" — measured: 20 keys in one account succeed ~90% of the time vs 30% with a single key.
 
 > 📷 Account configuration screen (where to issue multiple API keys):
 
@@ -31,7 +31,7 @@ Open the console at [https://platform.sensenova.cn/console](https://platform.sen
   <img src="./docs/account-config-screenshot.png" alt="SenseNova account configuration screenshot" width="720">
 </p>
 
-### 3. Register ≥ 2 accounts (recommended)
+### 3. Register multiple accounts (4 recommended)
 
 SenseNova limits are **account- / endpoint-scoped** — multiple keys inside the *same* account share a single quota bucket. So spreading keys across **≥ 2 accounts** is what actually bypasses the single-account bottleneck.
 
