@@ -19,6 +19,42 @@ dsh-sensenova-freeapi is an unofficial **DeepSeek Harness** (DSH) LLM provider p
 
 ---
 
+## Installation & updates
+
+### Via the DSH plugin UI (recommended)
+
+1. Open the DSH **plugin installation** screen
+2. Paste this address into the install input:
+
+```
+https://github.com/modesthub/dsh-sensenova-freeapi
+```
+
+3. Confirm the install, then **restart DSH** so the plugin takes effect
+4. The **plugin detail page** shows the installed version (this README ships with **v0.2.7**)
+
+### Updating
+
+- Paste the **same address again** in the install screen (or uninstall and reinstall) to pull the latest code
+- **Restart DSH** afterwards; the version shown on the plugin detail page changes — the simplest way to confirm the update landed
+- To pin a version, append a tag: `https://github.com/modesthub/dsh-sensenova-freeapi#v0.2.7`
+
+### Command line (alternative)
+
+```bash
+# GitHub (recommended; lib/ is prebuilt, no build step needed)
+dsh plugin --profile <name> add github:modesthub/dsh-sensenova-freeapi
+
+# Local path (for plugin development)
+dsh plugin --profile <name> add /path/to/dsh-sensenova-freeapi
+```
+
+Then configure SenseNova on the **Models** page:
+- Default credential env var: `SENSENOVA_API_KEY`
+- Default base URL: `https://token.sensenova.cn/v1`
+
+---
+
 ## 🚀 Quick Start: Sign Up, Get Keys, Configure Accounts
 
 ### 1. Create a SenseNova account
@@ -81,6 +117,46 @@ The following are taken from long-running measurements (2026-09), ordered by use
 > 💡 **Bottom line:** use `deepseek-v4-flash` for daily/code/agent work; `sensenova-6.8-flash-lite` when you need image understanding; `glm-5.2` for pure-text maximum throughput. **Avoid `deepseek-flash` (V4.1).**
 
 > 🔭 **Pairing recommendation (vision assist):** run the main model on `deepseek-v4-flash` (fast, stable, low-cost) and leave image recognition to the vision-assist plugin — install [`dsh-sensenova-vision-aid`](https://github.com/modesthub/dsh-sensenova-vision-aid), which spawns a child agent switched to the SenseNova vision model (`sensenova-6.8-flash-lite` → `deepseek-flash` → `kimi-k3` failover) and **reuses this plugin's key automatically** (default `reuseFreeapiCredentials=true`, no second key needed). **Best combination: `deepseek-v4-flash` for text/code/agent work + vision-aid for images — fast and reliable.**
+
+---
+
+## UI buttons at a glance
+
+| Button | Location | What it does |
+|---|---|---|
+| **Export all keys** | Import / export keys card | Pulls every account key (default included) into the text box as plain text |
+| **Import into accounts** | Same card | Parses the text and writes it as a **draft** (Save lights up; nothing is written until you save) |
+| **Clear box** | Same card | Empties the import / export text box |
+| **Refresh** | Top-right of the page title | Re-queries every account's credential state manually (fallback; normally automatic) |
+| **Clear all** | Right of the multi-account card title | After a second confirmation (within 3 s) **stages every extra account for removal**; press Save to delete accounts + unset their credentials. The default account is kept |
+| **Save / Reset** | Page bottom | Save all drafts (import, clear, edits) / discard unsaved changes |
+
+> 🔒 Exported text contains **plaintext keys**: it is shown only in your local settings page, never uploaded or persisted by the plugin. Store it wherever you trust (a password manager is a good default).
+
+---
+
+## Key import / export (v0.2.1)
+
+The settings page gains an **Import / export keys** card below the credentials block:
+
+**Export** — click “Export all keys”: every account key (default included) is written as plain text into the box, in the same format as a hand-maintained key file:
+
+```
+# dsh-sensenova-freeapi key export — 2026-10-26T00:00:00.000Z
+Default:sk-...
+
+账户2
+0:sk-...
+1:sk-...
+```
+
+**Import** — paste that text (or your own `account N / index:key` or `label:key` lines) and click “Import into accounts”:
+Import **only stages a draft** — the page-level **Save** button lights up; pressing it writes the credentials and updates the account list (`accounts`).
+
+- a label matching an existing account overwrites that key (structure unchanged)
+- a new label allocates a fresh `SENSENOVA_API_KEY_N` ref and appends an account
+- `Default` / `1-0` writes the default account
+- duplicate keys and malformed lines are skipped with an inline notice (other lines still import)
 
 ---
 
@@ -211,91 +287,6 @@ None of the key parameters are guesses; they were **calibrated in long-running m
 - **Import**: paste `account N + index:key` groups or single `label:key` lines → **staged as a draft** (the Save button lights up); press Save to actually write the credentials and update accounts. A label matching an existing account overwrites that key.
 - Export goes through the host-only route `GET /api/sensenova/keysExport` (the client never sees plaintext); import writes the credentials store and updates `accounts` directly.
 - **Clear**: “Clear box” empties the import/export text; the accounts card gains “Clear all” — after a second confirmation the extra accounts are **staged for removal**; press Save to actually delete the accounts and their credentials (the default account is kept).
-## Key import / export (v0.2.1)
-
-The settings page gains an **Import / export keys** card below the credentials block:
-
-**Export** — click “Export all keys”: every account key (default included) is written as plain text into the box, in the same format as a hand-maintained key file:
-
-```
-# dsh-sensenova-freeapi key export — 2026-10-26T00:00:00.000Z
-Default:sk-...
-
-账户2
-0:sk-...
-1:sk-...
-```
-
-**Import** — paste that text (or your own `account N / index:key` or `label:key` lines) and click “Import into accounts”:
-Import **only stages a draft** — the page-level **Save** button lights up; pressing it writes the credentials and updates the account list (`accounts`).
-
-- a label matching an existing account overwrites that key (structure unchanged)
-- a new label allocates a fresh `SENSENOVA_API_KEY_N` ref and appends an account
-- `Default` / `1-0` writes the default account
-- duplicate keys and malformed lines are skipped with an inline notice (other lines still import)
-
-## UI buttons at a glance
-
-| Button | Location | What it does |
-|---|---|---|
-| **Export all keys** | Import / export keys card | Pulls every account key (default included) into the text box as plain text |
-| **Import into accounts** | Same card | Parses the text and writes it as a **draft** (Save lights up; nothing is written until you save) |
-| **Clear box** | Same card | Empties the import / export text box |
-| **Refresh** | Top-right of the page title | Re-queries every account's credential state manually (fallback; normally automatic) |
-| **Clear all** | Right of the multi-account card title | After a second confirmation (within 3 s) **stages every extra account for removal**; press Save to delete accounts + unset their credentials. The default account is kept |
-| **Save / Reset** | Page bottom | Save all drafts (import, clear, edits) / discard unsaved changes |
-
-> 🔒 Exported text contains **plaintext keys**: it is shown only in your local settings page, never uploaded or persisted by the plugin. Store it wherever you trust (a password manager is a good default).
-
-> 🛠️ **Fixed in v0.2.2**: importing new accounts no longer reports a false “write failed” — the old code judged by a `describe` round-trip before the new ref existed in the settings snapshot. It now trusts `credentials.set` and refreshes state once accounts are persisted.
-
-> 🔄 **Top “Refresh” button**: re-query every account's credential state manually (a fallback; normally state refreshes automatically).
-
-> 🛠️ **Fixed in v0.2.3**: bulk import no longer freezes the page — the host broadcasts `credentials/reference-updated` per key, and the old code re-described **all** refs after every write (80 keys → 80 full queries). Event handling is now debounced to 200 ms, the import loop suspends refreshes entirely and does a single describe at the end, and a “settings not ready” guard prevents an import from overwriting the existing account list.
-
-> 🛠️ **Fixed in v0.2.4**: (1) credential-state queries are now **batched (25 refs per call)** — describing 80+ refs in one go was rejected/timed out, which surfaced as “80 accounts · 0 configured”; (2) import is now a **draft flow** (Save button lights up, nothing is written until you save); (3) a manual **Refresh** button was added at the top.
-
-> 🧹 **v0.2.5**: added “Clear all accounts” and “Clear box”. Clearing is **staged**: after a second click within 3 s the rows disappear and Save lights up; pressing Save deletes the accounts and unsets their credentials. “Reset” undoes it.
-
-> ⚡ **v0.2.6**: rotation order is now **interleaved at runtime** (sorted by the label's “slot → account” pair). Sequential orders produced by bulk import no longer hurt throughput — **no need to re-import existing configs**. Measured: 72% vs 50% success; on throttled rounds 10 vs 16 attempts.
-
-> 🩺 **v0.2.7**: (1) key pool status indicator (current key / next key dimmed / pool counts + a flash animation on 429 rotation); (2) account list collapses when there are more than 8; (3) seed diagnostics warn when the configured account count disagrees with the pool size — pinpoints the “install/import without restart” ordering race.
-
----
-
-## Installation & updates
-
-### Via the DSH plugin UI (recommended)
-
-1. Open the DSH **plugin installation** screen
-2. Paste this address into the install input:
-
-```
-https://github.com/modesthub/dsh-sensenova-freeapi
-```
-
-3. Confirm the install, then **restart DSH** so the plugin takes effect
-4. The **plugin detail page** shows the installed version (this README ships with **v0.2.5**)
-
-### Updating
-
-- Paste the **same address again** in the install screen (or uninstall and reinstall) to pull the latest code
-- **Restart DSH** afterwards; the version shown on the plugin detail page changes — the simplest way to confirm the update landed
-- To pin a version, append a tag: `https://github.com/modesthub/dsh-sensenova-freeapi#v0.2.5`
-
-### Command line (alternative)
-
-```bash
-# GitHub (recommended; lib/ is prebuilt, no build step needed)
-dsh plugin --profile <name> add github:modesthub/dsh-sensenova-freeapi
-
-# Local path (for plugin development)
-dsh plugin --profile <name> add /path/to/dsh-sensenova-freeapi
-```
-
-Then configure SenseNova on the **Models** page:
-- Default credential env var: `SENSENOVA_API_KEY`
-- Default base URL: `https://token.sensenova.cn/v1`
 
 ---
 
@@ -331,6 +322,23 @@ pnpm run typecheck
 pnpm run build    # tsdown → lib/
 pnpm test         # node --import tsx --test tests/**/*.test.ts
 ```
+
+---
+
+---
+
+## Changelog
+
+Oldest → newest. See “Rotation” and “Why it runs stably” above for the mechanics.
+
+- 🎉 **v0.2.0**: 429 pipeline rework (in-place retry first / per-model wait) + capacity 100 + fixed 3 s probe + multi-account 20-key measurement docs.
+- 🎯 **v0.2.1**: key import / export (host-only export route + settings import panel).
+- 🛠️ **Fixed in v0.2.2**: importing new accounts no longer reports a false “write failed” — the old code judged by a `describe` round-trip before the new ref existed in the settings snapshot. It now trusts `credentials.set` and refreshes state once accounts are persisted.
+- 🛠️ **Fixed in v0.2.3**: bulk import no longer freezes the page — the host broadcasts `credentials/reference-updated` per key, and the old code re-described **all** refs after every write (80 keys → 80 full queries). Event handling is now debounced to 200 ms, the import loop suspends refreshes entirely and does a single describe at the end, and a “settings not ready” guard prevents an import from overwriting the existing account list.
+- 🛠️ **Fixed in v0.2.4**: (1) credential-state queries are now **batched (25 refs per call)** — describing 80+ refs in one go was rejected/timed out, which surfaced as “80 accounts · 0 configured”; (2) import is now a **draft flow** (Save button lights up, nothing is written until you save); (3) a manual **Refresh** button was added at the top.
+- 🧹 **v0.2.5**: added “Clear all accounts” and “Clear box”. Clearing is **staged**: after a second click within 3 s the rows disappear and Save lights up; pressing Save deletes the accounts and unsets their credentials. “Reset” undoes it.
+- ⚡ **v0.2.6**: rotation order is now **interleaved at runtime** (sorted by the label's “slot → account” pair). Sequential orders produced by bulk import no longer hurt throughput — **no need to re-import existing configs**. Measured: 72% vs 50% success; on throttled rounds 10 vs 16 attempts.
+- 🩺 **v0.2.7**: (1) key pool status indicator (current key / next key dimmed / pool counts + a flash animation on 429 rotation); (2) account list collapses when there are more than 8; (3) seed diagnostics warn when the configured account count disagrees with the pool size — pinpoints the “install/import without restart” ordering race.
 
 ---
 
