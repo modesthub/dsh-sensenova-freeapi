@@ -894,6 +894,10 @@ export class SenseNovaSettingsController {
   private keysIo: KeysIoState = { text: '', busy: false, message: '', error: '' };
   private failed = false;
   private savedCount = 0;
+  /** 凭据刷新防抖定时器（v0.2.3：合并批量导入产生的连发事件）。 */
+  private refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  /** >0 时挂起凭据刷新（批量导入循环内使用，v0.2.3）。 */
+  private suspendCredentialRefresh = 0;
 
   private readonly listeners = new Set<() => void>();
   private readonly disposers: Array<() => void> = [];
@@ -916,6 +920,10 @@ export class SenseNovaSettingsController {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.refreshTimer !== undefined) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = undefined;
+    }
     for (const dispose of this.disposers) dispose();
     this.disposers.length = 0;
     this.listeners.clear();
@@ -1289,9 +1297,26 @@ export class SenseNovaSettingsController {
     this.publish();
   }
 
-  /** 凭据域状态重读（外部写入 key 后刷新已配置/可写徽标）。 */
+  /** 凭据域状态重读（外部写入 key 后刷新「已配置 / 可写」徽标）；立即执行。 */
   async refreshCredentials(): Promise<void> {
     await this.describeAll();
+  }
+
+  /**
+   * 合并短时间内的多次凭据事件（v0.2.3）。
+   *
+   * 宿主的 `credentials/reference-updated` 是**逐条**广播的 —— 批量导入 20 把 key
+   * 就会连发 20 次事件，而每次 `describeAll()` 都要把全部 ref（最大 80+）问一遍。
+   * 逐次全量查询会把 UI 线程钉死在 IPC 上（表现：导入后界面卡住/转圈/刷新不回来）。
+   * 因此事件入口改用 200ms 尾延迟合并；导入循环内则直接挂起（`suspendCredentialRefresh`）。
+   */
+  scheduleCredentialsRefresh(): void {
+    if (this.suspendCredentialRefresh > 0) return;
+    if (this.refreshTimer !== undefined) return;
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = undefined;
+      void this.describeAll();
+    }, 200);
   }
 
   /** 当前页面涉及的 credential-ref 集合键（默认 ref + stored/added 账户 ref）。 */
@@ -1564,11 +1589,26 @@ export class SenseNovaSettingsController {
       this.publish();
       return;
     }
+    // 就绪守卫（v0.2.3）：快照未就绪时 `storedAccounts()` 为空，此时写 accounts
+    // 会把既有账户整表抹掉 —— 宁可不导入，也不能丢配置。
+    if (this.scope.getSnapshot().status !== 'ready') {
+      this.keysIo = {
+        ...this.keysIo,
+        busy: false,
+        message: '',
+        error: '设置尚未加载完成，请稍候重试导入',
+      };
+      this.publish();
+      return;
+    }
     this.keysIo = { ...this.keysIo, busy: true, message: '', error: '' };
     this.publish();
     const errors = [...parsed.errors];
     const writtenRefs: string[] = [];
     let imported = 0;
+    // 挂起逐条凭据刷新：80 把 key 会连发 80 次 reference-updated，
+    // 逐次全量 describe 会把 UI 拖死（v0.2.3）。
+    this.suspendCredentialRefresh += 1;
     try {
       const defaultRef = this.credentialRef() ?? DEFAULT_API_KEY_ENV;
       const existing = this.effectiveAccounts().map((a) => ({ label: a.label, ref: a.ref }));
@@ -1614,7 +1654,7 @@ export class SenseNovaSettingsController {
       this.keysIo = {
         ...this.keysIo,
         busy: false,
-        message: `已导入 ${imported} 把 key${errors.length > 0 ? `（${errors.length} 条提示）` : ''}`,
+        message: `已导入 ${imported} 把 key（已直接生效，无需保存）${errors.length > 0 ? `（${errors.length} 条提示）` : ''}`,
         error: errors.length > 0 ? errors.slice(0, 5).join('；') : '',
       };
     } catch (error) {
@@ -1624,6 +1664,8 @@ export class SenseNovaSettingsController {
         message: '',
         error: error instanceof Error ? error.message : '导入失败',
       };
+    } finally {
+      this.suspendCredentialRefresh = Math.max(0, this.suspendCredentialRefresh - 1);
     }
     this.publish();
   }

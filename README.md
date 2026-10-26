@@ -8,7 +8,7 @@ dsh-sensenova-freeapi 是一个非官方的 **DeepSeek Harness**（DSH）LLM 提
   <img src="./docs/lockup.png" alt="DeepSeek Harness × SenseNova" width="720">
 </p>
 
-![release](https://img.shields.io/badge/status-0.2.2-3fb950)
+![release](https://img.shields.io/badge/status-0.2.3-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 > 参考实现：[`@mars-sea/dsh-commandcode-provider`](https://github.com/Mars-Sea/dsh-commandcode-provider)（MIT）。本插件只保留多账户连接能力；登录流程、用量面板、套餐窗口、命令行工具均已裁剪。
@@ -202,6 +202,8 @@ Default:sk-...
 > 🔒 导出文本是**明文密钥**：只在本机设置页显示，插件不上传、不落盘；请自行决定保存位置（建议放在密码管理器）。
 
 > 🛠️ **v0.2.2 修复**：导入新账户时不再误报「写入失败」——旧版按 `describe` 回读判定，而新 ref 尚未进入设置快照；现在以 `credentials.set` 的返回值为准，并在账户落盘后统一刷新状态。
+
+> 🛠️ **v0.2.3 修复**：批量导入导致界面卡死——宿主的 `credentials/reference-updated` 是逐条广播，旧代码每写一把 key 就全量 `describe` 一次（80 把 = 80 次全量查询）。现在事件入口改为 **200ms 防抖**，导入循环内直接**挂起**刷新，结束后只查一次；同时新增「设置尚未就绪」守卫，避免快照未就绪时写 `accounts` 抹掉既有账户。
 
 ---
 

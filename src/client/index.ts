@@ -231,7 +231,7 @@ function applyClientSurfaces(ctx: ClientContextLike, credentials: CredentialsFac
 
   // 宿主的凭据域提交（set/unset/外部编辑）后重读配置状态，刷新「已配置/可写」徽标。
   ctx.effect(() => ctx.remote.$on('credentials/reference-updated', () => {
-    void controller.refreshCredentials();
+    controller.scheduleCredentialsRefresh();
   }), 'dsh-sensenova-freeapi: credential invalidations');
 
   const injected = () => ({

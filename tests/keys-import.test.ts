@@ -30,12 +30,15 @@ function makeScope(value: Record<string, unknown>): SettingsScope<Record<string,
 }
 
 /** 最小凭据面：内存 Map。 */
-function makeCredentials(store: Map<string, string>) {
+function makeCredentials(store: Map<string, string>, counter?: { describe: number }) {
   return {
-    describe: async (refs: string[]) => ({
+    describe: async (refs: string[]) => {
+      if (counter !== undefined) counter.describe += 1;
+      return {
       ok: true,
-      value: Object.fromEntries(refs.map((ref) => [ref, { configured: store.has(ref), writable: true }])),
-    }),
+        value: Object.fromEntries(refs.map((ref) => [ref, { configured: store.has(ref), writable: true }])),
+      };
+    },
     set: async (ref: string, value: string) => {
       store.set(ref, value);
       return { ok: true };
@@ -47,9 +50,12 @@ function makeCredentials(store: Map<string, string>) {
   };
 }
 
-function makeController(store: Map<string, string>, value: Record<string, unknown>) {
+function makeController(store: Map<string, string>, value: Record<string, unknown>, counter?: { describe: number }) {
   const scope = makeScope(value);
-  const controller = new SenseNovaSettingsController(scope as never, makeCredentials(store) as never);
+  const controller = new SenseNovaSettingsController(
+    scope as never,
+    makeCredentials(store, counter) as never,
+  );
   return { scope, controller };
 }
 
@@ -105,5 +111,31 @@ test('导入：重复密钥只写一次', async () => {
   controller.editKeysIoText(['1-0:sk-samesamesame', '1-1:sk-samesamesame'].join('\n'));
   await controller.importKeys();
   assert.match(controller.state().keysIo.message, /已导入 1 把/);
+  controller.dispose();
+});
+
+test('导入：不会因逐条 reference-updated 触发全量 describe（v0.2.3 防抖）', async () => {
+  const store = new Map<string, string>();
+  const counter = { describe: 0 };
+  const { controller } = makeController(store, {
+    apiKeyEnv: 'SENSENOVA_API_KEY',
+    accounts: [],
+  }, counter);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const before = counter.describe;
+  const lines: string[] = [];
+  for (let account = 1; account <= 4; account += 1) {
+    lines.push(`账户${account}`);
+    for (let slot = 0; slot < 5; slot += 1) {
+      lines.push(`${slot}:sk-${'a'.repeat(10)}${account}${slot}`);
+    }
+  }
+  controller.editKeysIoText(lines.join('\n'));
+  await controller.importKeys();
+  const during = counter.describe - before;
+  assert.ok(during <= 3, `导入期间 describe 次数应很少，实际 ${during}`);
+  // 静置一个防抖窗口，不应出现事件风暴式的额外查询
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.ok(counter.describe - before <= 5, '导入后不应有大量重复 describe');
   controller.dispose();
 });
