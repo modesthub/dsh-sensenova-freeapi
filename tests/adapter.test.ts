@@ -907,7 +907,7 @@ test('stream: 无键并行工具分片经 BlockAssembler 组装为独立完整 t
 
 // ---- fix-sensenova-429-quota-retry 新增用例 ----
 
-import { classify429Body, TPM_PROBE_BACKOFF_STEPS_MS } from '../src/adapter.ts';
+import { classify429Body } from '../src/adapter.ts';
 
 test('classify429Body: 已知形态精确分类（含别名 code），其余一律可轮换', () => {
   // code 8 数字（2026-09-04 实测现场；message 措辞随版本漂移，不参与分类）
