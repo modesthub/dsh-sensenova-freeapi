@@ -1,6 +1,6 @@
 ## Context
 
-本设计承接 `proposal.md` 的动机与范围，具体实现以 `specs/sensenova-provider/spec.md` 的已定要求和 `tasks.md` 的完成状态为准。当前适配器已经采用“目录快照驱动能力、请求前账号轮换、SSE 状态机翻译”的结构，相关实现集中在 `/Users/lizhiyuan/项目/deepseek-harness-plugin/dsh-sensenova-freeapi/src/adapter.ts` 与 `/Users/lizhiyuan/项目/deepseek-harness-plugin/dsh-sensenova-freeapi/src/accounts.ts`。
+本设计承接 `proposal.md` 的动机与范围，具体实现以 `specs/sensenova-provider/spec.md` 的已定要求和 `tasks.md` 的完成状态为准。当前适配器已经采用“目录快照驱动能力、请求前账号轮换、SSE 状态机翻译”的结构，相关实现集中在 `src/adapter.ts` 与 `src/accounts.ts`。
 
 目录请求使用 `{apiBase}/models`，解析后只保留输出模态包含 `text` 的条目，并应用已知不可路由清单、适配器生命周期内的失败缓存及用户选择覆盖。目录快照原子替换 `catalog`，使后续 `resolveModel()` 消费同一批能力数据；没有可解析凭据时，目录请求直接返回空列表，不阻塞 provider 注册。
 
