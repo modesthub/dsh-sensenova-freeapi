@@ -316,6 +316,46 @@ export function plainConfig(config: SensenovaConfig): SensenovaConfig {
   return out as SensenovaConfig;
 }
 
+/**
+ * 从账户 label 解析**轮换排序键**（v0.2.6）。
+ *
+ * 约定 label 为「账户号-序号」（如 `2-3`），`Default` 视为 `1-0`。
+ * 按 (序号, 账户号) 升序排列即得到交替顺序：1-0, 2-0, 3-0, 4-0, 1-1, 2-1 …
+ *
+ * @param label - 账户可读标签。
+ * @returns 排序键；label 不符合约定时返回 undefined（调用方回退配置顺序）。
+ */
+export function accountRotationKey(label: string): { slot: number; account: number } | undefined {
+  if (label === 'Default') return { slot: 0, account: 1 };
+  const matched = /^(\d+)-(\d+)$/.exec(label);
+  if (matched === null) return undefined;
+  return { slot: Number(matched[2]), account: Number(matched[1]) };
+}
+
+/**
+ * 按**交替顺序**重排账户（v0.2.6，导出供单测）。
+ *
+ * 为什么在轮换侧排序而不是要求用户手工排配置：账户级限流是独立桶，顺序排布
+ * （某账户的 20 把全在前）会把前 19 次尝试全花在同一个桶上。实测 18 轮对照
+ * （20 次尝试上限）：交替成功 72% / 顺序 50%，限流轮次下交替均 10 次尝试、顺序均 16 次。
+ *
+ * 只有**全部** label 都能解析时才重排；出现自定义命名则原样返回，避免按猜测语义
+ * 打乱用户配置。
+ *
+ * @param accounts - 原始账户列表（按配置顺序）。
+ * @returns 交错排序后的列表（或原列表）。
+ */
+export function interleavedAccounts<T extends { label: string }>(accounts: readonly T[]): readonly T[] {
+  const entries = accounts.map((spec) => ({ spec, order: accountRotationKey(spec.label) }));
+  if (!entries.every((entry) => entry.order !== undefined)) return accounts;
+  entries.sort((a, b) => {
+    const left = a.order as { slot: number; account: number };
+    const right = b.order as { slot: number; account: number };
+    return left.slot - right.slot || left.account - right.account;
+  });
+  return entries.map((entry) => entry.spec);
+}
+
 /** 一个解析后的账户槽位：id/label + 合法 credential-ref 名。 */
 export interface ResolvedAccountSpec {
   id: string;
@@ -572,15 +612,17 @@ export function apply(ctx: Context, config: SensenovaConfig): void {
     return undefined;
   };
 
-  const slots = (): readonly AccountSlot[] => options().accounts.map((spec) => ({
-    id: spec.id,
-    label: spec.label,
-    // 🔴 2026-09-27：新增 `ref` 透传。`ResolvedAccountSpec` 本来就有它（同文件上方定义），
-    // 但旧 `AccountSlot` 没有这个字段 ⇒ 一路丢到这里，导致限流日志只能记 sha256 指纹
-    // （如 `f9145012`）、无法显示可读的 credential-ref 名（如 `SENSENOVA_API_KEY_2`）。
-    ref: spec.ref,
-    resolveKey: () => resolveRef(spec),
-  }));
+  // 轮换侧按「序号→账户」交替排序（v0.2.6）：账户级限流是独立桶，顺序排布会把
+  // 前 19 次尝试全花在同一个账户上（实测 20 次尝试上限下成功率 50% vs 交替 72%）。
+  const slots = (): readonly AccountSlot[] => interleavedAccounts(options().accounts).map((spec) => ({
+      id: spec.id,
+      label: spec.label,
+      // 🔴 2026-09-27：新增 `ref` 透传。`ResolvedAccountSpec` 本来就有它（同文件上方定义），
+      // 但旧 `AccountSlot` 没有这个字段 ⇒ 一路丢到这里，导致限流日志只能记 sha256 指纹
+      // （如 `f9145012`）、无法显示可读的 credential-ref 名（如 `SENSENOVA_API_KEY_2`）。
+      ref: spec.ref,
+      resolveKey: () => resolveRef(spec),
+    }));
 
   const preferredId = (): string | undefined => {
     const active = options().activeAccount;

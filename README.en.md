@@ -8,7 +8,7 @@ dsh-sensenova-freeapi is an unofficial **DeepSeek Harness** (DSH) LLM provider p
   <img src="./docs/lockup.png" alt="DeepSeek Harness × SenseNova" width="720">
 </p>
 
-![release](https://img.shields.io/badge/status-0.2.5-3fb950)
+![release](https://img.shields.io/badge/status-0.2.6-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 > Reference implementation: [`@mars-sea/dsh-commandcode-provider`](https://github.com/Mars-Sea/dsh-commandcode-provider) (MIT). This plugin keeps only the multi-account connectivity; the login flow, usage dashboard, plan window, and CLI tooling are all trimmed away.
@@ -38,9 +38,9 @@ SenseNova limits are **account- / endpoint-scoped** — multiple keys inside the
 - **Accounts are the key lever**: each account owns an independent quota bucket, so account count = bucket count. Measured: 4 accounts × 20 keys = 4 independent buckets × 20 draw chances, lifting the success rate from ~30% (single key) to ~100%.
 - This plugin's running/blocked dual-list + account rotation is built exactly for the multi-account case.
 
-### 4. Enter API keys in alternating-account order
+### 4. Account order: the plugin interleaves accounts automatically
 
-When configuring `accounts[]` in the Models page, interleave keys from **different accounts**. For two accounts `A`, `B`, order them like:
+Configure accounts in any order — at rotation time the plugin re-sorts by the label's “slot → account” pair, producing a cross-account interleaved order:
 
 ```
 A1  B1  A2  B2  A3  B3  …  (i.e. 121212 alternating)
@@ -119,6 +119,8 @@ Three non-negotiable properties (the essential difference from the legacy whole-
 | `quotaRotation=false` (15s retry, no key switch) | 4/6 (67%) | 36.9s | 27.4-46.4s (2 failures at 50s) |
 
 > Why rotation is faster: a key switch costs **0.2s each** (2-4 keys usually hit), while host backoff costs **17s per retry**. Even with more 429s, rotation stays at "15s wait + 12-15s generation" ≈ 28s; without rotation you can only wait for host backoff — two retries already cost 45-50s, or fail outright.
+
+**Rotation order (auto-interleaved since v0.2.6)**: when labels look like `account-slot` (`Default` counts as `1-0`), the plugin sorts by **(slot, account)** before rotating: `1-0 → 2-0 → 3-0 → 4-0 → 1-1 → 2-1 …`. The first 4 attempts therefore cover **4 independent quota buckets**, whereas a config-ordered list (all 20 keys of one account first) spends its first 19 attempts in a single bucket. Measured over 18 rounds (20-attempt cap): **interleaved 72% vs sequential 50%** success; on throttled rounds interleaved needed 10 attempts vs 16. Labels outside this format keep the configured order.
 
 **States and throttle classification**:
 
@@ -225,6 +227,8 @@ Import **only stages a draft** — the page-level **Save** button lights up; pre
 > 🛠️ **Fixed in v0.2.4**: (1) credential-state queries are now **batched (25 refs per call)** — describing 80+ refs in one go was rejected/timed out, which surfaced as “80 accounts · 0 configured”; (2) import is now a **draft flow** (Save button lights up, nothing is written until you save); (3) a manual **Refresh** button was added at the top.
 
 > 🧹 **v0.2.5**: added “Clear all accounts” and “Clear box”. Clearing is **staged**: after a second click within 3 s the rows disappear and Save lights up; pressing Save deletes the accounts and unsets their credentials. “Reset” undoes it.
+
+> ⚡ **v0.2.6**: rotation order is now **interleaved at runtime** (sorted by the label's “slot → account” pair). Sequential orders produced by bulk import no longer hurt throughput — **no need to re-import existing configs**. Measured: 72% vs 50% success; on throttled rounds 10 vs 16 attempts.
 
 ---
 

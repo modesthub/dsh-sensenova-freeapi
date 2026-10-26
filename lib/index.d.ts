@@ -702,6 +702,35 @@ export declare const Config: z<SensenovaConfig>;
  * @returns 字段全部为普通值的配置，可直接交给 `resolveAdapterOptions()`。
  */
 export declare function plainConfig(config: SensenovaConfig): SensenovaConfig;
+/**
+ * 从账户 label 解析**轮换排序键**（v0.2.6）。
+ *
+ * 约定 label 为「账户号-序号」（如 `2-3`），`Default` 视为 `1-0`。
+ * 按 (序号, 账户号) 升序排列即得到交替顺序：1-0, 2-0, 3-0, 4-0, 1-1, 2-1 …
+ *
+ * @param label - 账户可读标签。
+ * @returns 排序键；label 不符合约定时返回 undefined（调用方回退配置顺序）。
+ */
+export declare function accountRotationKey(label: string): {
+  slot: number;
+  account: number;
+} | undefined;
+/**
+ * 按**交替顺序**重排账户（v0.2.6，导出供单测）。
+ *
+ * 为什么在轮换侧排序而不是要求用户手工排配置：账户级限流是独立桶，顺序排布
+ * （某账户的 20 把全在前）会把前 19 次尝试全花在同一个桶上。实测 18 轮对照
+ * （20 次尝试上限）：交替成功 72% / 顺序 50%，限流轮次下交替均 10 次尝试、顺序均 16 次。
+ *
+ * 只有**全部** label 都能解析时才重排；出现自定义命名则原样返回，避免按猜测语义
+ * 打乱用户配置。
+ *
+ * @param accounts - 原始账户列表（按配置顺序）。
+ * @returns 交错排序后的列表（或原列表）。
+ */
+export declare function interleavedAccounts<T extends {
+  label: string;
+}>(accounts: readonly T[]): readonly T[];
 /** 一个解析后的账户槽位：id/label + 合法 credential-ref 名。 */
 export interface ResolvedAccountSpec {
   id: string;
