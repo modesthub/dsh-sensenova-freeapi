@@ -11,6 +11,10 @@ dsh-sensenova-freeapi is an unofficial **DeepSeek Harness** (DSH) LLM provider p
 ![release](https://img.shields.io/badge/status-0.2.7-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
+> ⚠️ **If the plugin fails to install**: enter DSH through **plugin-less mode**, then repair it with **Da Fei Yu (大肥鱼)** — it costs at most **¥0.5**.
+
+> ⭐ **Testing and building this took real effort — if it helps you, please give the repo a Star. Thank you!**
+
 > Reference implementation: [`@mars-sea/dsh-commandcode-provider`](https://github.com/Mars-Sea/dsh-commandcode-provider) (MIT). This plugin keeps only the multi-account connectivity; the login flow, usage dashboard, plan window, and CLI tooling are all trimmed away.
 
 ---
@@ -77,6 +81,34 @@ The following are taken from long-running measurements (2026-09), ordered by use
 > 💡 **Bottom line:** use `deepseek-v4-flash` for daily/code/agent work; `sensenova-6.8-flash-lite` when you need image understanding; `glm-5.2` for pure-text maximum throughput. **Avoid `deepseek-flash` (V4.1).**
 
 > 🔭 **Pairing recommendation (vision assist):** run the main model on `deepseek-v4-flash` (fast, stable, low-cost) and leave image recognition to the vision-assist plugin — install [`dsh-sensenova-vision-aid`](https://github.com/modesthub/dsh-sensenova-vision-aid), which spawns a child agent switched to the SenseNova vision model (`sensenova-6.8-flash-lite` → `deepseek-flash` → `kimi-k3` failover) and **reuses this plugin's key automatically** (default `reuseFreeapiCredentials=true`, no second key needed). **Best combination: `deepseek-v4-flash` for text/code/agent work + vision-aid for images — fast and reliable.**
+
+---
+
+## 📊 Author’s hands-on ranking: time efficiency
+
+Subjective ranking after long-term real use — **time efficiency first**, not benchmarks:
+
+| Rank | Model | Time efficiency | Error rate | Best for |
+|---|---|---|---|---|
+| 🥇 **1** | `glm-5.2` | **Fastest** (most obvious on small tasks) | Higher (review complex work) | Small tasks, short Q&A, pure-text batches |
+| 🥈 **2** | `deepseek-v4-flash` | Fast | **Lower** | **Daily driver**: code, agents, long-horizon work |
+| 🥉 **3** | `deepseek-flash` | Slower (time utilisation still low) | Medium | **Night-time automation** (light throttling, can run slow) |
+
+> 💡 `glm-5.2` is very fast on small tasks but may make more mistakes; `deepseek-v4-flash` balances speed and correctness best, enough for everyday use; `deepseek-flash` has low daytime time utilisation but is solid for **overnight automation**.
+
+### This big update: winning back time efficiency for `deepseek-flash`
+
+The goal of this release is to **improve `deepseek-flash` time efficiency** — via **multiple accounts, many keys, and interleaved layout**, validated through many repeated test runs to find the highest time-utilisation configuration.
+
+Three levers, each solving a different problem:
+
+| Lever | Effect | What it solves |
+|---|---|---|
+| **Account count** | More quota (each account is an independent bucket) | Fixes throttling **at the source** |
+| **Key count** | Faster “draws” (many quick retries after a 429) | Eases throttling **via key switching** |
+| **Key layout** | Better distribution (interleaving covers several buckets in the first few tries) | **Same attempts, more quota covered** |
+
+> See “Why it runs stably” and “Rotation” below: 20 keys in one account reach 90% (a single key only 30%); interleaved layout 72% vs sequential 50%.
 
 ---
 
@@ -174,7 +206,6 @@ None of the key parameters are guesses; they were **calibrated in long-running m
 
 ---
 
-
 ### 🔑 Key import / export (v0.2.1)
 - **Export**: pull every account key (default included) into the text box in `account N` groups — local only, never uploaded.
 - **Import**: paste `account N + index:key` groups or single `label:key` lines → **staged as a draft** (the Save button lights up); press Save to actually write the credentials and update accounts. A label matching an existing account overwrites that key.
@@ -198,7 +229,6 @@ Default:sk-...
 **Import** — paste that text (or your own `account N / index:key` or `label:key` lines) and click “Import into accounts”:
 Import **only stages a draft** — the page-level **Save** button lights up; pressing it writes the credentials and updates the account list (`accounts`).
 
-
 - a label matching an existing account overwrites that key (structure unchanged)
 - a new label allocates a fresh `SENSENOVA_API_KEY_N` ref and appends an account
 - `Default` / `1-0` writes the default account
@@ -214,7 +244,6 @@ Import **only stages a draft** — the page-level **Save** button lights up; pre
 | **Refresh** | Top-right of the page title | Re-queries every account's credential state manually (fallback; normally automatic) |
 | **Clear all** | Right of the multi-account card title | After a second confirmation (within 3 s) **stages every extra account for removal**; press Save to delete accounts + unset their credentials. The default account is kept |
 | **Save / Reset** | Page bottom | Save all drafts (import, clear, edits) / discard unsaved changes |
-
 
 > 🔒 Exported text contains **plaintext keys**: it is shown only in your local settings page, never uploaded or persisted by the plugin. Store it wherever you trust (a password manager is a good default).
 
@@ -269,9 +298,6 @@ Then configure SenseNova on the **Models** page:
 - Default base URL: `https://token.sensenova.cn/v1`
 
 ---
-
-
-
 
 ## Configuration
 
