@@ -8,7 +8,7 @@ dsh-sensenova-freeapi 是一个非官方的 **DeepSeek Harness**（DSH）LLM 提
   <img src="./docs/lockup.png" alt="DeepSeek Harness × SenseNova" width="720">
 </p>
 
-![release](https://img.shields.io/badge/status-0.2.0-3fb950)
+![release](https://img.shields.io/badge/status-0.2.1-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 > 参考实现：[`@mars-sea/dsh-commandcode-provider`](https://github.com/Mars-Sea/dsh-commandcode-provider)（MIT）。本插件只保留多账户连接能力；登录流程、用量面板、套餐窗口、命令行工具均已裁剪。
@@ -169,6 +169,37 @@ SenseNova 渠道对单 key 存在 **TPM / RPM 并发与配额限制**，瞬时�
 ### 📊 「当前模型 + 全部参数」面板（只读可视化）
 - 回答三个问题：**我现在用的是哪个模型？它支持什么？哪些参数可以改？**
 - 数据来自宿主实际解析 + 多轮实测校准。
+
+---
+
+
+### 🔑 Key 导入 / 导出（v0.2.1）
+- **导出**：一键拉取全部账户（含默认账户）的密钥，按 `账户N` 分节写到文本框，纯本机操作、不上传。
+- **导入**：粘贴「`账户N` + `序号:密钥`」分块或「`标签:密钥`」单行，自动匹配已有账户（标签相同则覆盖密钥），其余分配新 ref 并新增账户。
+- 导出走 host 只读路由 `GET /api/sensenova/keysExport`（客户端读不到明文，必须由宿主 `credentials.resolve` 解析）；导入直接写凭据域并更新 `accounts`。
+## 导入 / 导出 Key（v0.2.1）
+
+设置页「凭据与账户」下方新增 **导入 / 导出 Key** 卡片：
+
+**导出**：点「导出全部 Key」→ 全部账户（含默认账户）的密钥以明文写入文本框，格式与手工整理的密钥文件一致：
+
+```
+# dsh-sensenova-freeapi key export — 2026-10-26T00:00:00.000Z
+Default:sk-...
+
+账户2
+0:sk-...
+1:sk-...
+```
+
+**导入**：把上述文本（或你自己整理的「账户N / 序号:密钥」「标签:密钥」）粘进文本框，点「导入到账户」：
+
+- 标签与已有账户相同 → 覆盖该账户的密钥（不改账户结构）
+- 新标签 → 从 `SENSENOVA_API_KEY_2` 起分配新 credential-ref 并追加账户
+- `Default` / `1-0` → 写入默认账户
+- 重复密钥、非法行会被跳过并在下方提示（不阻断其它行）
+
+> 🔒 导出文本是**明文密钥**：只在本机设置页显示，插件不上传、不落盘；请自行决定保存位置（建议放在密码管理器）。
 
 ---
 

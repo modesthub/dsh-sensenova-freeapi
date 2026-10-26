@@ -8,7 +8,7 @@ dsh-sensenova-freeapi is an unofficial **DeepSeek Harness** (DSH) LLM provider p
   <img src="./docs/lockup.png" alt="DeepSeek Harness × SenseNova" width="720">
 </p>
 
-![release](https://img.shields.io/badge/status-0.2.0-3fb950)
+![release](https://img.shields.io/badge/status-0.2.1-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 > Reference implementation: [`@mars-sea/dsh-commandcode-provider`](https://github.com/Mars-Sea/dsh-commandcode-provider) (MIT). This plugin keeps only the multi-account connectivity; the login flow, usage dashboard, plan window, and CLI tooling are all trimmed away.
@@ -169,6 +169,37 @@ None of the key parameters are guesses; they were **calibrated in long-running m
 ### 📊 "Current model + all parameters" panel (read-only visualization)
 - Answers: **which model am I using? what does it support? which parameters can I change?**
 - Sourced from the host's actual parsing plus multiple measurement rounds.
+
+---
+
+
+### 🔑 Key import / export (v0.2.1)
+- **Export**: pull every account key (default included) into the text box in `account N` groups — local only, never uploaded.
+- **Import**: paste `account N + index:key` groups or single `label:key` lines; matching labels overwrite the account key, new labels get a fresh credential ref and a new account.
+- Export goes through the host-only route `GET /api/sensenova/keysExport` (the client never sees plaintext); import writes the credentials store and updates `accounts` directly.
+## Key import / export (v0.2.1)
+
+The settings page gains an **Import / export keys** card below the credentials block:
+
+**Export** — click “Export all keys”: every account key (default included) is written as plain text into the box, in the same format as a hand-maintained key file:
+
+```
+# dsh-sensenova-freeapi key export — 2026-10-26T00:00:00.000Z
+Default:sk-...
+
+账户2
+0:sk-...
+1:sk-...
+```
+
+**Import** — paste that text (or your own `account N / index:key` or `label:key` lines) and click “Import into accounts”:
+
+- a label matching an existing account overwrites that key (structure unchanged)
+- a new label allocates a fresh `SENSENOVA_API_KEY_N` ref and appends an account
+- `Default` / `1-0` writes the default account
+- duplicate keys and malformed lines are skipped with an inline notice (other lines still import)
+
+> 🔒 Exported text contains **plaintext keys**: it is shown only in your local settings page, never uploaded or persisted by the plugin. Store it wherever you trust (a password manager is a good default).
 
 ---
 

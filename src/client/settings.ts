@@ -8,6 +8,8 @@
  * 页面不回显明文。
  */
 
+import { KEYS_EXPORT_ROUTE, parseKeysText } from '../keys-io.ts';
+
 /** 设置命名空间与 provider 路由（与冻结契约一致）。 */
 export const SENSENOVA_NS = 'llm-sensenova';
 export const SENSENOVA_ROUTE = 'sensenova';
@@ -87,6 +89,25 @@ export const ERROR_LOG_ROUTE = '/api/sensenova/errorLog';
  * **必须同值** —— client bundle 无法 import host 模块。
  */
 export const MODEL_INFO_ROUTE = '/api/sensenova/modelInfo';
+
+// ── Key 导入 / 导出（v0.2.1）──────────────────────────────────────────────
+
+/**
+ * Key 导出只读路由。⚠️ 与 host 侧 `keys-api.ts` 的 `KEYS_EXPORT_ROUTE` **必须同值**
+ * —— 实际上两者共用 `keys-io.ts` 的同一常量，这里是 client 侧的引用入口。
+ */
+
+/** 「导入 / 导出 Key」区块状态（只读区块，不参与 dirty / 保存流程）。 */
+export interface KeysIoState {
+  /** 文本框内容（导出结果或待导入文本）。 */
+  text: string;
+  /** 导出 / 导入进行中。 */
+  busy: boolean;
+  /** 最近一次操作的成功提示。 */
+  message: string;
+  /** 最近一次操作的错误提示。 */
+  error: string;
+}
 
 /** 一个请求参数的三态可改性：✅可改 / ⚙️插件级默认 / ❌不可改。 */
 export type ParamMutability = 'host' | 'l2' | 'none';
@@ -744,6 +765,8 @@ export interface SettingsState {
   poolPolicy: PoolPolicyDraft;
   /** key 池策略的当前展示值（含未保存 staged）。 */
   poolPolicyDraft: PoolPolicyDraft;
+  /** 「导入 / 导出 Key」区块状态（只读区块，不参与 dirty / 保存流程）。 */
+  keysIo: KeysIoState;
   dirty: boolean;
   saving: boolean;
   failed: boolean;
@@ -866,6 +889,9 @@ export class SenseNovaSettingsController {
   private describedRefsKey = '';
 
   private saving = false;
+
+  /** 「导入 / 导出 Key」区块状态（只读区块，不参与 dirty）。 */
+  private keysIo: KeysIoState = { text: '', busy: false, message: '', error: '' };
   private failed = false;
   private savedCount = 0;
 
@@ -988,6 +1014,7 @@ export class SenseNovaSettingsController {
       retryPolicyDraft: { ...retryPolicy, ...this.stagedRetry },
       poolPolicy,
       poolPolicyDraft: { ...poolPolicy, ...this.stagedPool },
+      keysIo: { ...this.keysIo },
       dirty,
       saving: this.saving,
       failed: this.failed,
@@ -1459,6 +1486,117 @@ export class SenseNovaSettingsController {
     if (landed) {
       this.savedCount += 1;
       this.discard();
+    }
+    this.publish();
+  }
+
+  // ── Key 导入 / 导出（v0.2.1）────────────────────────────────────────────
+
+  /** 编辑「导入 / 导出 Key」文本框（只读区块，不参与 dirty / 保存流程）。 */
+  editKeysIoText(text: string): void {
+    this.keysIo = { ...this.keysIo, text, message: '', error: '' };
+    this.publish();
+  }
+
+  /** 拉取导出文本（host 路由解析全部凭据；客户端凭据面读不到明文）。 */
+  async exportKeys(): Promise<void> {
+    if (this.keysIo.busy) return;
+    this.keysIo = { ...this.keysIo, busy: true, message: '', error: '' };
+    this.publish();
+    try {
+      const response = await fetch(KEYS_EXPORT_ROUTE, { credentials: 'same-origin' });
+      if (!response.ok) throw new Error(`llm-sensenova: keys export HTTP ${response.status}`);
+      const snapshot = (await response.json()) as {
+        ok?: boolean;
+        exported?: number;
+        text?: string;
+        error?: string;
+      };
+      if (snapshot.ok !== true) throw new Error(snapshot.error ?? '导出失败');
+      const exported = typeof snapshot.exported === 'number' ? snapshot.exported : 0;
+      this.keysIo = {
+        text: typeof snapshot.text === 'string' ? snapshot.text : '',
+        busy: false,
+        message: `已导出 ${exported} 把 key`,
+        error: '',
+      };
+    } catch (error) {
+      this.keysIo = {
+        ...this.keysIo,
+        busy: false,
+        message: '',
+        error: error instanceof Error ? error.message : '导出失败',
+      };
+    }
+    this.publish();
+  }
+
+  /**
+   * 导入文本框里的 key。
+   *
+   * 匹配规则：label 与已有账户相同时复用其 credential-ref；否则从
+   * `SENSENOVA_API_KEY_2` 起分配新 ref 并追加账户；`Default` / `1-0` 写入默认账户。
+   */
+  async importKeys(): Promise<void> {
+    if (this.keysIo.busy) return;
+    const parsed = parseKeysText(this.keysIo.text);
+    if (parsed.entries.length === 0) {
+      this.keysIo = { ...this.keysIo, message: '', error: parsed.errors[0] ?? '没有可导入的 key' };
+      this.publish();
+      return;
+    }
+    this.keysIo = { ...this.keysIo, busy: true, message: '', error: '' };
+    this.publish();
+    const errors = [...parsed.errors];
+    let imported = 0;
+    try {
+      const defaultRef = this.credentialRef() ?? DEFAULT_API_KEY_ENV;
+      const existing = this.effectiveAccounts().map((a) => ({ label: a.label, ref: a.ref }));
+      const used = new Set<string>([defaultRef, ...existing.map((a) => a.ref)]);
+      const added: AccountConfig[] = [];
+      let nextNum = 2;
+      for (const entry of parsed.entries) {
+        const isDefault = entry.label === 'Default' || entry.label === '1-0';
+        let ref = defaultRef;
+        if (!isDefault) {
+          const existingHit = existing.find((a) => a.label === entry.label);
+          const addedHit = added.find((a) => a.label === entry.label);
+          if (existingHit !== undefined) {
+            ref = existingHit.ref;
+          } else if (addedHit !== undefined) {
+            ref = addedHit.apiKeyEnv;
+          } else {
+            while (used.has(`SENSENOVA_API_KEY_${nextNum}`)) nextNum += 1;
+            ref = `SENSENOVA_API_KEY_${nextNum}`;
+            nextNum += 1;
+            used.add(ref);
+            added.push({ id: ref, label: entry.label, apiKeyEnv: ref });
+          }
+        }
+        const ok = await this.writeKeyTo(ref, entry.key);
+        if (ok) imported += 1;
+        else errors.push(`${entry.label}: 写入失败`);
+      }
+      if (added.length > 0) {
+        const list: AccountConfig[] = [
+          ...this.storedAccounts().map((a) => ({ id: a.id, label: a.label, apiKeyEnv: a.apiKeyEnv })),
+          ...added,
+        ];
+        await this.scope.set('accounts', list);
+      }
+      this.keysIo = {
+        ...this.keysIo,
+        busy: false,
+        message: `已导入 ${imported} 把 key${errors.length > 0 ? `（${errors.length} 条提示）` : ''}`,
+        error: errors.length > 0 ? errors.slice(0, 5).join('；') : '',
+      };
+    } catch (error) {
+      this.keysIo = {
+        ...this.keysIo,
+        busy: false,
+        message: '',
+        error: error instanceof Error ? error.message : '导入失败',
+      };
     }
     this.publish();
   }

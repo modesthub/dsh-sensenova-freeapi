@@ -60,6 +60,7 @@ import {
   type KeyPoolParams,
 } from './key-pool.ts';
 import { ERROR_LOG_ROUTE, handleErrorLogHttp } from './error-log-api.ts';
+import { KEYS_EXPORT_ROUTE, handleKeysExportHttp } from './keys-api.ts';
 import {
   MODEL_INFO_ROUTE,
   handleModelInfoHttp,
@@ -792,6 +793,36 @@ export function apply(ctx: Context, config: SensenovaConfig): void {
         fetch: (request) => handleErrorLogHttp(request),
       }),
       `llm-sensenova: error log route ${ERROR_LOG_ROUTE}`,
+    );
+  });
+
+  // Key 导出的**只读路由**（v0.2.1，设置页「导入 / 导出 Key」区块）。
+  //
+  // 为什么必须由 host 提供：客户端凭据面只有 describe/set/unset，读不到明文。
+  // 与错误记录路由同一范式：可选注入 connection、同源鉴权、绝不抛。
+  ctx.inject(['connection'], (connectionCtx) => {
+    connectionCtx.effect(
+      () => connectionCtx.connection.fetch.register({
+        path: KEYS_EXPORT_ROUTE,
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: () =>
+          handleKeysExportHttp({
+            entries: async () => {
+              // 每次导出重新解析全部槽位（宿主凭据契约：每操作读取，禁止跨操作缓存）。
+              const all = await pool.resolvedAccounts();
+              return all.map((account) => {
+                const described = keyIndex.get(account.key);
+                return {
+                  label: described?.label ?? 'Default',
+                  ref: described?.ref ?? DEFAULT_API_KEY_ENV,
+                  key: account.key,
+                };
+              });
+            },
+          }),
+      }),
+      `llm-sensenova: keys export route ${KEYS_EXPORT_ROUTE}`,
     );
   });
 

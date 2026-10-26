@@ -121,6 +121,9 @@ function injectPageCss(): void {
     '.sn-activeAccountSelect>.sn-input{width:100%}',
     '.sn-selectChevron{position:absolute;right:8px;top:50%;width:14px;height:14px;transform:translateY(-50%);background-color:var(--dsw-alias-label-tertiary,#888f98);pointer-events:none;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2714%27 height=%2714%27 viewBox=%270 0 14 14%27 fill=%27none%27%3E%3Cpath d=%27M3 5.5 7 9l4-3.5%27 stroke=%27white%27 stroke-width=%271.5%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E") center / 14px 14px no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2714%27 height=%2714%27 viewBox=%270 0 14 14%27 fill=%27none%27%3E%3Cpath d=%27M3 5.5 7 9l4-3.5%27 stroke=%27white%27 stroke-width=%271.5%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E") center / 14px 14px no-repeat}',
     '.sn-textarea{display:block;line-height:1.45;min-height:88px;resize:vertical}',
+    /* 导入 / 导出 Key 区块（v0.2.1） */
+    '.sn-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
+    '.sn-error{color:var(--dsw-alias-status-danger,#d93026)}',
     /* 账户列表：行间分隔更清晰 */
     '.sn-accountList{display:flex;flex-direction:column;gap:0;min-width:0}',
     '.sn-accountRow{display:flex;flex-direction:column;gap:8px;min-width:0;padding:12px 0}',
@@ -249,6 +252,9 @@ function applyClientSurfaces(ctx: ClientContextLike, credentials: CredentialsFac
     refreshErrorLog: () => void controller.refreshErrorLog(),
     toggleErrorLogRow: (index: number) => controller.toggleErrorLogRow(index),
     refreshModelInfo: () => void controller.refreshModelInfo(),
+    editKeysIoText: (text: string) => controller.editKeysIoText(text),
+    exportKeys: () => void controller.exportKeys(),
+    importKeys: () => void controller.importKeys(),
     setRetryMode: (mode: 'normal' | 'always') => controller.setRetryMode(mode),
     editRetry: (field: Parameters<SenseNovaSettingsController['editRetry']>[0], text: string) =>
       controller.editRetry(field, text),

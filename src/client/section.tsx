@@ -16,6 +16,7 @@ import {
 import type {
   ErrorLogState,
   FieldName,
+  KeysIoState,
   ModelInfoSnapshotView,
   ModelInfoState,
   ModelParamView,
@@ -66,6 +67,12 @@ export interface SenseNovaSectionProps {
   toggleErrorLogRow: (index: number) => void;
   /** 「当前模型 + 全部参数」面板：拉取快照（只读，2026-09-23 Phase 5）。 */
   refreshModelInfo: () => void;
+  /** Key 导入 / 导出：编辑文本框内容（v0.2.1）。 */
+  editKeysIoText: (text: string) => void;
+  /** Key 导入 / 导出：导出全部 key（host 只读路由返回明文）。 */
+  exportKeys: () => void;
+  /** Key 导入 / 导出：导入文本框里的 key。 */
+  importKeys: () => void;
   /** 重试策略：模式单选（W1 2026-09-17）。 */
   setRetryMode: (mode: 'normal' | 'always') => void;
   /** 重试策略：数字字段编辑。 */
@@ -525,6 +532,54 @@ function formatClock(ts: string): string {
  * 刻意**不自动拉取**：打开设置页本身不该产生 I/O，而多数人进来是为了改配置。
  * 用户点「刷新」才请求一次，之后可反复点。
  */
+/** 「导入 / 导出 Key」区块（v0.2.1）：导出走 host 只读路由，导入直接写凭据域。 */
+function KeysIoPanel(props: {
+  t: TranslateFn;
+  state: KeysIoState;
+  disabled: boolean;
+  onEditText: (text: string) => void;
+  onExport: () => void;
+  onImport: () => void;
+}): JSX.Element {
+  return (
+    <div className="sn-card">
+      <div className="sn-field">
+        <span className="sn-label">{props.t('keysIoTitle')}</span>
+        <p className="sn-hint">{props.t('keysIoHint')}</p>
+      </div>
+      <textarea
+        className="sn-textarea sn-input"
+        rows={8}
+        value={props.state.text}
+        placeholder={props.t('keysIoPlaceholder')}
+        spellCheck={false}
+        disabled={props.disabled || props.state.busy}
+        onChange={(event: ChangeEventLike) => props.onEditText(event.target.value)}
+      />
+      <div className="sn-actions">
+        <button
+          type="button"
+          className="sn-btnGhost"
+          disabled={props.disabled || props.state.busy}
+          onClick={props.onExport}
+        >
+          {props.t('keysExport')}
+        </button>
+        <button
+          type="button"
+          className="sn-btnPrimary"
+          disabled={props.disabled || props.state.busy || props.state.text.trim() === ''}
+          onClick={props.onImport}
+        >
+          {props.t('keysImport')}
+        </button>
+      </div>
+      {props.state.error !== '' ? <p className="sn-hint sn-error">{props.state.error}</p> : null}
+      {props.state.message !== '' ? <p className="sn-hint">{props.state.message}</p> : null}
+    </div>
+  );
+}
+
 function ErrorLogPanel(props: {
   t: TranslateFn;
   state: ErrorLogState;
@@ -1072,6 +1127,16 @@ export function SenseNovaSection(props: SenseNovaSectionProps): JSX.Element {
           </div>
         ) : null}
       </div>
+
+      {/* 导入 / 导出 Key（v0.2.1）：只读区块，不参与 dirty / 保存流程 */}
+      <KeysIoPanel
+        t={t}
+        state={state.keysIo}
+        disabled={disabled}
+        onEditText={props.editKeysIoText}
+        onExport={props.exportKeys}
+        onImport={props.importKeys}
+      />
 
       {/* 分组 3：高级选项 */}
       <SectionHeading text={t('groupAdvanced')} />
