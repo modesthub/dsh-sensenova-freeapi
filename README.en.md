@@ -77,7 +77,7 @@ This plugin flips the thinking: **throttling is not an accident, it is the stead
 ### Running / Blocked dual-list state machine
 
 <p align="center">
-  <img src="./docs/state-machine.en.png" alt="Running / Blocked dual-list state machine: after kickThreshold consecutive tpm throttles a key leaves the running list for the blocked list; the external scheduler probes with a minimal request, re-appends to the running tail on success, and backs off longer (15s → 30s → 60s) on failure" width="900">
+  <img src="./docs/state-machine.en.png" alt="Running / Blocked dual-list state machine: after kickThreshold consecutive tpm throttles a key leaves the running list for the blocked list; the external scheduler probes with a minimal request, re-appends to the running tail on success, probing every 3s" width="900">
 </p>
 
 Three non-negotiable properties (the essential difference from the legacy whole-pool short-circuit):
@@ -90,12 +90,30 @@ Three non-negotiable properties (the essential difference from the legacy whole-
 
 ---
 
-## Multi-account rotation
+## Rotation: retry in place first, then switch keys
 
-- Supports `1 default account + extra accounts` (`accounts[]`, each with its own `apiKeyEnv` credential ref), sharing one base URL.
-- Requests rotate in **alternating-account** order; a key excluded by `exclude` (401 or quota rotation) wraps around to **the next position**, avoiding the legacy "first-two ping-pong, key #3+ never used" bug.
-- **Quota-type 429s sticky-switch keys**: the rejected key stays usable and the next request continues from the next key, spreading one key's burst throttle over all keys.
-- Only **401 (invalid credential) permanently disables** a key until its credential changes; 429 never cools down or disables (throttling is normal, not an unhealthy account).
+**Full 429 handling pipeline**:
+
+1. **In-plugin retry in place** — wait on the same key for `deepseek-flash` 15s / `deepseek-v4-flash` 10s, at most once. On success: continue, no key switch, no log noise.
+2. **Key rotation** — if it still fails and `quotaRotation=true` (recommended), scan the **running list** round-robin from the position after the last-used key, skipping keys already tried in this request (`exclude`). This avoids the legacy "first two ping-pong, key #3+ never used" bug.
+3. **Borrow from blocked** — when all running candidates are excluded, borrow the *longest-blocked* key temporarily (**without changing its phase**), so a round can still try every key.
+4. **Throw to host** — only when every key fails (exponential backoff 15-19s, up to 24 retries).
+
+
+**Measured comparison (why not hard-wait)**
+
+| Strategy | Expected time | Note |
+|---|---|---|
+| 15s in-plugin retry + key rotation | ~17s | 10-round peak-hour measurement |
+| Same-key hard wait 15s then retry | ~29s | host-retry cost eats the gain |
+
+**States and throttle classification**:
+
+- Only **tpm-type 429s** accumulate consecutive strikes; after `kickThreshold` (default 2) the key is kicked into the blocked list. `rpm` / `rate` throttles are recorded but never kick (their buckets heal in seconds; kicking only loses prompt cache).
+- **Floor** — when only 1 key remains in running, it is never kicked; the pool never empties and agent requests always go out.
+- **401 (invalid credential)** — permanently disabled and removed from the pool, regardless of `quotaRotation`.
+- **Session stickiness** — after a rotation the session sticks to the new key (protects the server-side prompt cache); a successful request clears stickiness so the round-robin cursor drives the next pick.
+- **Probe limitation** — the blocked-key probe is a minimal request (`max_tokens: 1`, thinking off), so it only reflects the request-count bucket, not full TPM recovery of large requests; real availability of large requests is judged by the agent request itself.
 
 ---
 
@@ -120,7 +138,7 @@ None of the key parameters are guesses; they were **calibrated in long-running m
 - Consecutive-throttle kick-out, floor-never-empty, longest-blocked borrowing, probe recovery, fixed 3s probe — all configurable.
 - Each key's state (phase, strikes, blockedSince, probeAttempts) is read-only in the settings page.
 
-### 🔄 Dual-account rotation
+### 🔄 Rotation
 - Default account + extra accounts, same base URL.
 - Wrap-around rotation + sticky key-switch on quota-type 429s + permanent disable on 401.
 - A disabled key auto-recovers when its credential changes.
@@ -156,26 +174,6 @@ Then configure SenseNova on the **Models** page:
 ---
 
 
-## 429 handling pipeline (measured 2026-10)
-
-Order of operations on a 429:
-
-```
-HTTP 429
-  → in-plugin wait + retry (deepseek-flash 15s / v4-flash 10s, at most 1)
-      ├─ success → continue
-      └─ fail
-         → cross-account key rotation (0.1-0.2s each, covers independent buckets)
-             ├─ success → continue
-             └─ all fail → throw to host (backoff 15-19s + retry)
-```
-
-| Strategy | Expected time | Note |
-|---|---|---|
-| 15s in-plugin retry + key rotation | ~17s | 10-round peak-hour measurement |
-| Same-key hard wait 15s then retry | ~29s | host-retry cost eats the gain |
-
----
 
 ## Configuration
 
