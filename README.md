@@ -202,6 +202,18 @@ Default:sk-...
 - `Default` / `1-0` → 写入默认账户
 - 重复密钥、非法行会被跳过并在下方提示（不阻断其它行）
 
+## 界面按钮一览
+
+| 按钮 | 位置 | 作用 |
+|---|---|---|
+| **导出全部 Key** | 导入 / 导出 Key 卡片 | 拉取全部账户（含默认账户）的密钥，以明文写入文本框 |
+| **导入到账户** | 同上 | 解析文本框内容并写入**草稿**（保存按钮亮起，点保存才生效） |
+| **清空文本框** | 同上 | 清空导入 / 导出文本框内容 |
+| **刷新** | 页面标题右侧 | 手动重查全部账户的凭据状态（兜底；正常会自动刷新） |
+| **清空全部** | 多账户轮换卡片标题右侧 | 二次确认（3 秒内再点）后**暂存移除全部额外账户**；点「保存」才删账户 + 清除凭据，默认账户保留 |
+| **保存 / 重置** | 页面底部 | 保存所有草稿（导入、清空、编辑）／放弃未保存的修改 |
+
+
 > 🔒 导出文本是**明文密钥**：只在本机设置页显示，插件不上传、不落盘；请自行决定保存位置（建议放在密码管理器）。
 
 > 🛠️ **v0.2.2 修复**：导入新账户时不再误报「写入失败」——旧版按 `describe` 回读判定，而新 ref 尚未进入设置快照；现在以 `credentials.set` 的返回值为准，并在账户落盘后统一刷新状态。
@@ -216,24 +228,42 @@ Default:sk-...
 
 ---
 
-## 安装
+## 安装与更新
 
-```bash
-# 本地路径装入（推荐用于接入 DSH 验证）
-dsh plugin --profile <name> add /path/to/dsh-sensenova-freeapi
+### 通过 DSH 插件界面安装（推荐）
 
-# GitHub 发布后
-dsh plugin --profile <name> add github:modesthub/dsh-sensenova-freeapi
+1. 打开 DSH 的**插件安装**界面
+2. 在安装地址输入框中填入：
 
-# 或 npm 发布后
-dsh plugin --profile <name> add dsh-sensenova-freeapi
+```
+https://github.com/modesthub/dsh-sensenova-freeapi
 ```
 
-然后在「模型」页配置 SenseNova：
+3. 确认安装，然后**重启 DSH** 使插件生效
+4. 安装后可在**插件详情页**看到当前版本号（本 README 对应 **v0.2.5**）
+
+### 更新到最新版
+
+- 在插件安装界面**重新输入同一个地址**（或先卸载再安装）即可拉取最新代码
+- 更新后**重启 DSH**，插件详情页的版本号会随之变化 —— 这是确认是否更新成功最直接的方式
+- 想固定到某个版本，可在地址后追加 tag，例如 `https://github.com/modesthub/dsh-sensenova-freeapi#v0.2.5`
+
+### 命令行安装（备选）
+
+```bash
+# GitHub（推荐，装完即可用，lib/ 已预构建）
+dsh plugin --profile <name> add github:modesthub/dsh-sensenova-freeapi
+
+# 本地路径（用于开发调试）
+dsh plugin --profile <name> add /path/to/dsh-sensenova-freeapi
+```
+
+安装后到「模型」页配置 SenseNova：
 - 默认凭据环境变量：`SENSENOVA_API_KEY`
 - 默认 base URL：`https://token.sensenova.cn/v1`
 
 ---
+
 
 
 

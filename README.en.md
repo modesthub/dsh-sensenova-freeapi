@@ -202,6 +202,18 @@ Import **only stages a draft** — the page-level **Save** button lights up; pre
 - `Default` / `1-0` writes the default account
 - duplicate keys and malformed lines are skipped with an inline notice (other lines still import)
 
+## UI buttons at a glance
+
+| Button | Location | What it does |
+|---|---|---|
+| **Export all keys** | Import / export keys card | Pulls every account key (default included) into the text box as plain text |
+| **Import into accounts** | Same card | Parses the text and writes it as a **draft** (Save lights up; nothing is written until you save) |
+| **Clear box** | Same card | Empties the import / export text box |
+| **Refresh** | Top-right of the page title | Re-queries every account's credential state manually (fallback; normally automatic) |
+| **Clear all** | Right of the multi-account card title | After a second confirmation (within 3 s) **stages every extra account for removal**; press Save to delete accounts + unset their credentials. The default account is kept |
+| **Save / Reset** | Page bottom | Save all drafts (import, clear, edits) / discard unsaved changes |
+
+
 > 🔒 Exported text contains **plaintext keys**: it is shown only in your local settings page, never uploaded or persisted by the plugin. Store it wherever you trust (a password manager is a good default).
 
 > 🛠️ **Fixed in v0.2.2**: importing new accounts no longer reports a false “write failed” — the old code judged by a `describe` round-trip before the new ref existed in the settings snapshot. It now trusts `credentials.set` and refreshes state once accounts are persisted.
@@ -216,17 +228,34 @@ Import **only stages a draft** — the page-level **Save** button lights up; pre
 
 ---
 
-## Installation
+## Installation & updates
+
+### Via the DSH plugin UI (recommended)
+
+1. Open the DSH **plugin installation** screen
+2. Paste this address into the install input:
+
+```
+https://github.com/modesthub/dsh-sensenova-freeapi
+```
+
+3. Confirm the install, then **restart DSH** so the plugin takes effect
+4. The **plugin detail page** shows the installed version (this README ships with **v0.2.5**)
+
+### Updating
+
+- Paste the **same address again** in the install screen (or uninstall and reinstall) to pull the latest code
+- **Restart DSH** afterwards; the version shown on the plugin detail page changes — the simplest way to confirm the update landed
+- To pin a version, append a tag: `https://github.com/modesthub/dsh-sensenova-freeapi#v0.2.5`
+
+### Command line (alternative)
 
 ```bash
-# Install from a local path (recommended for validating against DSH)
-dsh plugin --profile <name> add dsh-sensenova-freeapi
-
-# After publishing to GitHub
+# GitHub (recommended; lib/ is prebuilt, no build step needed)
 dsh plugin --profile <name> add github:modesthub/dsh-sensenova-freeapi
 
-# After publishing to npm
-dsh plugin --profile <name> add dsh-sensenova-freeapi
+# Local path (for plugin development)
+dsh plugin --profile <name> add /path/to/dsh-sensenova-freeapi
 ```
 
 Then configure SenseNova on the **Models** page:
@@ -234,6 +263,7 @@ Then configure SenseNova on the **Models** page:
 - Default base URL: `https://token.sensenova.cn/v1`
 
 ---
+
 
 
 
