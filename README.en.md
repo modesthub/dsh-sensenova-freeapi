@@ -8,7 +8,7 @@ dsh-sensenova-freeapi is an unofficial **DeepSeek Harness** (DSH) LLM provider p
   <img src="./docs/lockup.png" alt="DeepSeek Harness × SenseNova" width="720">
 </p>
 
-![release](https://img.shields.io/badge/status-0.2.1-3fb950)
+![release](https://img.shields.io/badge/status-0.2.2-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 > Reference implementation: [`@mars-sea/dsh-commandcode-provider`](https://github.com/Mars-Sea/dsh-commandcode-provider) (MIT). This plugin keeps only the multi-account connectivity; the login flow, usage dashboard, plan window, and CLI tooling are all trimmed away.
@@ -200,6 +200,8 @@ Default:sk-...
 - duplicate keys and malformed lines are skipped with an inline notice (other lines still import)
 
 > 🔒 Exported text contains **plaintext keys**: it is shown only in your local settings page, never uploaded or persisted by the plugin. Store it wherever you trust (a password manager is a good default).
+
+> 🛠️ **Fixed in v0.2.2**: importing new accounts no longer reports a false “write failed” — the old code judged by a `describe` round-trip before the new ref existed in the settings snapshot. It now trusts `credentials.set` and refreshes state once accounts are persisted.
 
 ---
 

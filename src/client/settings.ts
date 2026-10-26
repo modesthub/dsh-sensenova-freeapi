@@ -656,7 +656,7 @@ export interface CredentialsDescribeResult {
 
 export interface CredentialsFace {
   describe(refs: string[]): Promise<CredentialsDescribeResult>;
-  set(ref: string, value: string): Promise<{ ok: boolean }>;
+  set(ref: string, value: string): Promise<{ ok: boolean; error?: unknown }>;
   unset(ref: string): Promise<{ ok: boolean }>;
 }
 
@@ -1312,12 +1312,13 @@ export class SenseNovaSettingsController {
   }
 
   /** 查询所有本页涉及的凭据引用的配置状态。 */
-  private async describeAll(): Promise<void> {
+  private async describeAll(extraRefs: readonly string[] = []): Promise<void> {
     const refs = [
       ...(this.credentialRef() !== undefined ? [this.credentialRef() as string] : []),
       ...this.storedAccounts().map((a) => a.apiKeyEnv),
       ...this.addedAccounts.map((a) => a.apiKeyEnv),
-    ];
+      ...extraRefs,
+    ].filter((ref, index, all) => all.indexOf(ref) === index);
     if (refs.length === 0) {
       this.describedRefsKey = '';
       return;
@@ -1358,6 +1359,24 @@ export class SenseNovaSettingsController {
     }
     await this.describeAll();
     return this.credentialStates.get(canonicalRef)?.configured ?? false;
+  }
+
+  /**
+   * 只写凭据、不等待 describe 回读（v0.2.1 导入专用）。
+   *
+   * 导入会新建账户（ref 尚未进 section），此时 describeAll 的 refs 集合里还没有它，
+   * 用 writeKeyTo 的回读判定会误报失败。导入以 credentials.set 的 ok 为准，
+   * 等 accounts 落盘后再统一 describeAll（带 extraRefs）。
+   */
+  private async writeKeyRaw(ref: string, value: string): Promise<{ ok: boolean; error?: string }> {
+    const canonicalRef = canonicalCredentialRef(ref);
+    if (canonicalRef === undefined) return { ok: false, error: '非法的 credential-ref' };
+    try {
+      const result = await this.credentials.set(canonicalRef, value);
+      return result.ok ? { ok: true } : { ok: false, error: String(result.error ?? '凭据写入被拒绝') };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   private async unsetKey(ref: string): Promise<boolean> {
@@ -1548,6 +1567,7 @@ export class SenseNovaSettingsController {
     this.keysIo = { ...this.keysIo, busy: true, message: '', error: '' };
     this.publish();
     const errors = [...parsed.errors];
+    const writtenRefs: string[] = [];
     let imported = 0;
     try {
       const defaultRef = this.credentialRef() ?? DEFAULT_API_KEY_ENV;
@@ -1573,9 +1593,13 @@ export class SenseNovaSettingsController {
             added.push({ id: ref, label: entry.label, apiKeyEnv: ref });
           }
         }
-        const ok = await this.writeKeyTo(ref, entry.key);
-        if (ok) imported += 1;
-        else errors.push(`${entry.label}: 写入失败`);
+        const written = await this.writeKeyRaw(ref, entry.key);
+        if (written.ok) {
+          imported += 1;
+          writtenRefs.push(ref);
+        } else {
+          errors.push(`${entry.label}: ${written.error ?? '写入失败'}`);
+        }
       }
       if (added.length > 0) {
         const list: AccountConfig[] = [
@@ -1584,6 +1608,9 @@ export class SenseNovaSettingsController {
         ];
         await this.scope.set('accounts', list);
       }
+      // 新账户的 ref 此时已随 accounts 落盘；额外带上本次写入的 ref，
+      // 保证「已配置」徽标立即正确（不依赖快照订阅的下一次刷新）。
+      await this.describeAll(writtenRefs);
       this.keysIo = {
         ...this.keysIo,
         busy: false,
