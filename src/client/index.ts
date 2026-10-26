@@ -123,6 +123,10 @@ function injectPageCss(): void {
     '.sn-textarea{display:block;line-height:1.45;min-height:88px;resize:vertical}',
     /* 导入 / 导出 Key 区块（v0.2.1） */
     '.sn-titleRow{display:flex;align-items:center;justify-content:space-between;gap:12px}',
+    '.sn-fieldActions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
+    '.sn-btnDanger{font-size:12px;line-height:1.4;padding:3px 10px;border-radius:6px;border:1px solid var(--dsw-alias-status-danger,#d93026);background:transparent;color:var(--dsw-alias-status-danger,#d93026);cursor:pointer;white-space:nowrap}',
+    '.sn-btnDanger:hover:not(:disabled){background:var(--dsw-alias-status-danger,#d93026);color:#fff}',
+    '.sn-btnDanger:disabled{opacity:.5;cursor:not-allowed}',
     '.sn-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
     '.sn-error{color:var(--dsw-alias-status-danger,#d93026)}',
     /* 账户列表：行间分隔更清晰 */
@@ -257,6 +261,7 @@ function applyClientSurfaces(ctx: ClientContextLike, credentials: CredentialsFac
     exportKeys: () => void controller.exportKeys(),
     importKeys: () => void controller.importKeys(),
     refreshCredentials: () => void controller.refreshCredentials(),
+    clearAllAccounts: () => controller.clearAllAccounts(),
     setRetryMode: (mode: 'normal' | 'always') => controller.setRetryMode(mode),
     editRetry: (field: Parameters<SenseNovaSettingsController['editRetry']>[0], text: string) =>
       controller.editRetry(field, text),

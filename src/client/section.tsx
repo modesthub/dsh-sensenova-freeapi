@@ -75,6 +75,8 @@ export interface SenseNovaSectionProps {
   importKeys: () => void;
   /** 顶部「刷新」：重查凭据状态（兜底手动刷新，v0.2.4）。 */
   refreshCredentials: () => void;
+  /** 清空全部额外账户（staged，保存后生效；v0.2.5）。 */
+  clearAllAccounts: () => void;
   /** 重试策略：模式单选（W1 2026-09-17）。 */
   setRetryMode: (mode: 'normal' | 'always') => void;
   /** 重试策略：数字字段编辑。 */
@@ -542,6 +544,7 @@ function KeysIoPanel(props: {
   onEditText: (text: string) => void;
   onExport: () => void;
   onImport: () => void;
+  onClearText: () => void;
 }): JSX.Element {
   return (
     <div className="sn-card">
@@ -574,6 +577,14 @@ function KeysIoPanel(props: {
           onClick={props.onImport}
         >
           {props.t('keysImport')}
+        </button>
+        <button
+          type="button"
+          className="sn-btnGhost"
+          disabled={props.disabled || props.state.busy || props.state.text === ''}
+          onClick={props.onClearText}
+        >
+          {props.t('keysIoClear')}
         </button>
       </div>
       {props.state.error !== '' ? <p className="sn-hint sn-error">{props.state.error}</p> : null}
@@ -990,6 +1001,22 @@ export function SenseNovaSection(props: SenseNovaSectionProps): JSX.Element {
   const disabled = !state.writable;
   const savedVisible = useSavedFlash(state.savedCount);
 
+  // 「清空全部账户」二次确认（3 秒后自动复原，避免误点）。
+  const [confirmClear, setConfirmClear] = useState(false);
+  useEffect(() => {
+    if (!confirmClear) return undefined;
+    const timer = setTimeout(() => setConfirmClear(false), 3000);
+    return () => clearTimeout(timer);
+  }, [confirmClear]);
+  const onClearAll = (): void => {
+    if (!confirmClear) {
+      setConfirmClear(true);
+      return;
+    }
+    setConfirmClear(false);
+    props.clearAllAccounts();
+  };
+
   const accounts = state.accounts;
   const credentialRefs = credentialReferences(state);
   const savedAccounts = accounts.filter((account) => !account.added);
@@ -1057,9 +1084,19 @@ export function SenseNovaSection(props: SenseNovaSectionProps): JSX.Element {
         <div className="sn-field">
           <div className="sn-fieldHead">
             <span className="sn-label">{t('accountsTitle')}</span>
-            <button type="button" className="sn-btnAdd" disabled={disabled} onClick={props.addAccount}>
-              {t('accountAdd')}
-            </button>
+            <span className="sn-fieldActions">
+              <button type="button" className="sn-btnAdd" disabled={disabled} onClick={props.addAccount}>
+                {t('accountAdd')}
+              </button>
+              <button
+                type="button"
+                className={confirmClear ? 'sn-btnDanger' : 'sn-btnAdd'}
+                disabled={disabled || (savedAccounts.length === 0 && accounts.every((a) => !a.added))}
+                onClick={onClearAll}
+              >
+                {confirmClear ? t('accountsClearConfirm') : t('accountsClear')}
+              </button>
+            </span>
           </div>
           {/* 轮换说明与「配额类 429 换 key」开关状态保持一致（默认仍表述 429 不切换）。 */}
           <p className="sn-hint">{state.quotaRotationDraft ? t('accountsHintQuotaRotation') : t('accountsHint')}</p>
@@ -1148,6 +1185,7 @@ export function SenseNovaSection(props: SenseNovaSectionProps): JSX.Element {
         onEditText={props.editKeysIoText}
         onExport={props.exportKeys}
         onImport={props.importKeys}
+        onClearText={() => props.editKeysIoText('')}
       />
 
       {/* 分组 3：高级选项 */}

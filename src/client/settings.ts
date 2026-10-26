@@ -890,6 +890,8 @@ export class SenseNovaSettingsController {
   private labelDrafts = new Map<string, string>();
   private keyDrafts = new Map<string, string>();
   private keyClears = new Set<string>();
+  /** 待清除的凭据 ref（清空全部账户时，账户行已移除、无法再回查 ref，v0.2.5）。 */
+  private refClears = new Set<string>();
 
   private credentialStates = new Map<string, CredentialView>();
 
@@ -1150,6 +1152,29 @@ export class SenseNovaSettingsController {
     this.publish();
   }
 
+  /**
+   * 清空全部额外账户（v0.2.5）—— **staged**，点「保存」才真正删除账户与凭据。
+   *
+   * 默认账户（`apiKeyEnv`）不在 accounts 列表里，因此保留不动。
+   * 账户被移除后无法再通过 `effectiveAccounts()` 回查 ref，所以这里把 ref
+   * 记进 `refClears`，由 `save()` 统一 unset。
+   */
+  clearAllAccounts(): void {
+    for (const account of this.storedAccounts()) {
+      this.removedIds.add(account.id);
+      this.refClears.add(account.apiKeyEnv);
+      this.labelDrafts.delete(account.id);
+      this.keyDrafts.delete(account.id);
+      this.keyClears.delete(account.id);
+    }
+    this.addedAccounts = [];
+    // 活动账户若指向被清空的账户，回到「自动」。
+    const currentActive = this.sectionValue('activeAccount');
+    if (typeof currentActive === 'string' && currentActive !== '') this.stagedActiveAccount = '';
+    this.failed = false;
+    this.publish();
+  }
+
   removeAccount(id: string): void {
     const addedIndex = this.addedAccounts.findIndex((a) => a.id === id);
     if (addedIndex >= 0) this.addedAccounts.splice(addedIndex, 1);
@@ -1310,6 +1335,7 @@ export class SenseNovaSettingsController {
     this.labelDrafts.clear();
     this.keyDrafts.clear();
     this.keyClears.clear();
+    this.refClears.clear();
     this.failed = false;
     this.publish();
   }
@@ -1464,6 +1490,10 @@ export class SenseNovaSettingsController {
       for (const id of this.keyClears) {
         const account = this.effectiveAccounts().find((a) => a.id === id);
         if (account !== undefined && !(await this.unsetKey(account.ref))) landed = false;
+      }
+      // 清空全部账户时，账户行已从 effectiveAccounts 消失，按 ref 直接清凭据（v0.2.5）。
+      for (const ref of this.refClears) {
+        if (!(await this.unsetKey(ref))) landed = false;
       }
       for (const [id, text] of this.keyDrafts) {
         const value = text.trim();

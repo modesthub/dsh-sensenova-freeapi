@@ -168,3 +168,31 @@ test('导入：不会因逐条 reference-updated 触发全量 describe（防抖�
   assert.ok(counter.describe - before <= 5, `导入期间 describe 次数应很少，实际 ${counter.describe - before}`);
   controller.dispose();
 });
+
+test('清空全部账户：staged 移除，保存后清空 accounts 并删除对应凭据（v0.2.5）', async () => {
+  const store = new Map<string, string>();
+  store.set('SENSENOVA_API_KEY', 'sk-default');
+  store.set('SENSENOVA_API_KEY_2', 'sk-two');
+  store.set('SENSENOVA_API_KEY_3', 'sk-three');
+  const { scope, controller } = makeController(store, {
+    apiKeyEnv: 'SENSENOVA_API_KEY',
+    accounts: [
+      { id: 'account-2', label: '2-0', apiKeyEnv: 'SENSENOVA_API_KEY_2' },
+      { id: 'account-3', label: '3-0', apiKeyEnv: 'SENSENOVA_API_KEY_3' },
+    ],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(controller.state().accounts.length, 2);
+
+  controller.clearAllAccounts();
+  assert.equal(controller.state().dirty, true, '清空应置 dirty（保存按钮亮起）');
+  assert.equal(controller.state().accounts.length, 0, '移除是 staged 的：行立即消失，但凭据/accounts 尚未落库');
+
+  await controller.save();
+  assert.equal(controller.state().dirty, false);
+  assert.equal(controller.state().accounts.length, 0, '保存后账户清空');
+  assert.equal(store.has('SENSENOVA_API_KEY_2'), false, '对应凭据应被删除');
+  assert.equal(store.has('SENSENOVA_API_KEY_3'), false);
+  assert.equal(store.get('SENSENOVA_API_KEY'), 'sk-default', '默认账户凭据保留');
+  controller.dispose();
+});

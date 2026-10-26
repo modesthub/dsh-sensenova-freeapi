@@ -8,7 +8,7 @@ dsh-sensenova-freeapi is an unofficial **DeepSeek Harness** (DSH) LLM provider p
   <img src="./docs/lockup.png" alt="DeepSeek Harness × SenseNova" width="720">
 </p>
 
-![release](https://img.shields.io/badge/status-0.2.4-3fb950)
+![release](https://img.shields.io/badge/status-0.2.5-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 > Reference implementation: [`@mars-sea/dsh-commandcode-provider`](https://github.com/Mars-Sea/dsh-commandcode-provider) (MIT). This plugin keeps only the multi-account connectivity; the login flow, usage dashboard, plan window, and CLI tooling are all trimmed away.
@@ -177,6 +177,7 @@ None of the key parameters are guesses; they were **calibrated in long-running m
 - **Export**: pull every account key (default included) into the text box in `account N` groups — local only, never uploaded.
 - **Import**: paste `account N + index:key` groups or single `label:key` lines → **staged as a draft** (the Save button lights up); press Save to actually write the credentials and update accounts. A label matching an existing account overwrites that key.
 - Export goes through the host-only route `GET /api/sensenova/keysExport` (the client never sees plaintext); import writes the credentials store and updates `accounts` directly.
+- **Clear**: “Clear box” empties the import/export text; the accounts card gains “Clear all” — after a second confirmation the extra accounts are **staged for removal**; press Save to actually delete the accounts and their credentials (the default account is kept).
 ## Key import / export (v0.2.1)
 
 The settings page gains an **Import / export keys** card below the credentials block:
@@ -210,6 +211,8 @@ Import **only stages a draft** — the page-level **Save** button lights up; pre
 > 🛠️ **Fixed in v0.2.3**: bulk import no longer freezes the page — the host broadcasts `credentials/reference-updated` per key, and the old code re-described **all** refs after every write (80 keys → 80 full queries). Event handling is now debounced to 200 ms, the import loop suspends refreshes entirely and does a single describe at the end, and a “settings not ready” guard prevents an import from overwriting the existing account list.
 
 > 🛠️ **Fixed in v0.2.4**: (1) credential-state queries are now **batched (25 refs per call)** — describing 80+ refs in one go was rejected/timed out, which surfaced as “80 accounts · 0 configured”; (2) import is now a **draft flow** (Save button lights up, nothing is written until you save); (3) a manual **Refresh** button was added at the top.
+
+> 🧹 **v0.2.5**: added “Clear all accounts” and “Clear box”. Clearing is **staged**: after a second click within 3 s the rows disappear and Save lights up; pressing Save deletes the accounts and unsets their credentials. “Reset” undoes it.
 
 ---
 
