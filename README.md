@@ -8,7 +8,7 @@ dsh-sensenova-freeapi 是一个非官方的 **DeepSeek Harness**（DSH）LLM 提
   <img src="./docs/lockup.png" alt="DeepSeek Harness × SenseNova" width="720">
 </p>
 
-![release](https://img.shields.io/badge/status-alpha_0.1.0-ff9a00)
+![release](https://img.shields.io/badge/status-0.2.0-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 > 参考实现：[`@mars-sea/dsh-commandcode-provider`](https://github.com/Mars-Sea/dsh-commandcode-provider)（MIT）。本插件只保留多账户连接能力；登录流程、用量面板、套餐窗口、命令行工具均已裁剪。
