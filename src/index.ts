@@ -60,6 +60,7 @@ import {
   type KeyPoolParams,
 } from './key-pool.ts';
 import { ERROR_LOG_ROUTE, handleErrorLogHttp } from './error-log-api.ts';
+import { KEYS_STATUS_ROUTE, handleKeysStatusHttp } from './keys-status-api.ts';
 import { KEYS_EXPORT_ROUTE, handleKeysExportHttp } from './keys-api.ts';
 import {
   MODEL_INFO_ROUTE,
@@ -673,6 +674,27 @@ export function apply(ctx: Context, config: SensenovaConfig): void {
     const all = await pool.resolvedAccounts();
     for (const account of all) rememberKey(account.key, account.slot);
     const dropped = keyPool.seed(all.map(account => account.key));
+    // v0.2.7 诊断：配置账户数 / 解析成功数 / 池大小。池只有 1 把而配置有 80 把时
+    // （启动时序竞态：配置写入晚于插件 apply），一眼可定位「池未灌满」。
+    {
+      const poolSnapshot = keyPool.snapshot();
+      ctx.logger.info(
+        'llm-sensenova: key 池 seed — 配置 %d 账户 / 解析 %d 把 / 池 %d（运行 %d，阻塞 %d），丢弃 %d',
+        connection.accountCount,
+        all.length,
+        poolSnapshot.size,
+        poolSnapshot.running.length,
+        poolSnapshot.blocked.length,
+        dropped,
+      );
+      if (connection.accountCount > 1 && poolSnapshot.size <= 1) {
+        ctx.logger.warn(
+          'llm-sensenova: 配置了 %d 个账户但 key 池只有 %d 把 —— 可能是「导入/安装后未重启 DSH」的启动时序竞态，请重启 DSH。',
+          connection.accountCount,
+          poolSnapshot.size,
+        );
+      }
+    }
     if (dropped > 0) {
       ctx.logger.warn(
         'llm-sensenova: %d 个账户超出 key 池容量上限 %d，已被忽略（可调高设置页的「槽位上限」）',
@@ -865,6 +887,24 @@ export function apply(ctx: Context, config: SensenovaConfig): void {
           }),
       }),
       `llm-sensenova: keys export route ${KEYS_EXPORT_ROUTE}`,
+    );
+  });
+
+  // Key 池状态只读路由（v0.2.7，设置页「当前 key」指示器 + 轮换动画）。
+  // 与 error-log / keysExport 同范式：可选注入 connection、同源鉴权、绝不抛。
+  // 只回 label / 把数 / 位置，**绝不回 key 原文**。
+  ctx.inject(['connection'], (connectionCtx) => {
+    connectionCtx.effect(
+      () => connectionCtx.connection.fetch.register({
+        path: KEYS_STATUS_ROUTE,
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: () => handleKeysStatusHttp({
+          snapshot: () => keyPool.snapshot(),
+          describe: (key) => keyIndex.get(key),
+        }),
+      }),
+      `llm-sensenova: keys status route ${KEYS_STATUS_ROUTE}`,
     );
   });
 

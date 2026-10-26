@@ -17,6 +17,7 @@ import type {
   ErrorLogState,
   FieldName,
   KeysIoState,
+  KeysStatusState,
   ModelInfoSnapshotView,
   ModelInfoState,
   ModelParamView,
@@ -75,6 +76,8 @@ export interface SenseNovaSectionProps {
   importKeys: () => void;
   /** 顶部「刷新」：重查凭据状态（兜底手动刷新，v0.2.4）。 */
   refreshCredentials: () => void;
+  /** Key 池状态：拉取当前 key + 下一把 + 池把数（v0.2.7）。 */
+  refreshKeysStatus: () => void;
   /** 清空全部额外账户（staged，保存后生效；v0.2.5）。 */
   clearAllAccounts: () => void;
   /** 重试策略：模式单选（W1 2026-09-17）。 */
@@ -537,6 +540,52 @@ function formatClock(ts: string): string {
  * 用户点「刷新」才请求一次，之后可反复点。
  */
 /** 「导入 / 导出 Key」区块（v0.2.1）：导出走 host 只读路由，导入直接写凭据域。 */
+/**
+ * Key 池状态面板（v0.2.7）：当前 key + 下一把（半隐形态）+ 池把数。
+ * 撞 429 换 key 时 state.flash 置起，触发 1.2s 切换动画。
+ */
+function KeyStatusPanel(props: {
+  t: TranslateFn;
+  state: KeysStatusState;
+  onRefresh: () => void;
+}): JSX.Element {
+  const { snapshot, status, flash } = props.state;
+  if (status === 'loading' && snapshot === undefined) {
+    return (
+      <div className="sn-keyStatus">
+        <span className="sn-hint">{props.t('keyStatusLoading')}</span>
+      </div>
+    );
+  }
+  if (snapshot === undefined || !snapshot.available) {
+    return (
+      <div className="sn-keyStatus">
+        <span className="sn-hint">{props.t('keyStatusUnavailable')}</span>
+        <button type="button" className="sn-reset" onClick={props.onRefresh}>
+          {props.t('refresh')}
+        </button>
+      </div>
+    );
+  }
+  const currentClass = flash ? 'sn-keyCurrent sn-keyFlash' : 'sn-keyCurrent';
+  return (
+    <div className="sn-keyStatus">
+      <span className="sn-hint">{props.t('keyStatusCurrent')}</span>
+      <span className={currentClass}>{snapshot.currentLabel ?? props.t('keyStatusNone')}</span>
+      {snapshot.nextLabel !== undefined ? (
+        <span className="sn-keyNext">{props.t('keyStatusNext')} {snapshot.nextLabel}</span>
+      ) : null}
+      <span className="sn-hint">
+        {props.t('keyStatusPool', { running: snapshot.running, blocked: snapshot.blocked, size: snapshot.size })}
+      </span>
+      <button type="button" className="sn-reset" onClick={props.onRefresh}>
+        {props.t('refresh')}
+      </button>
+    </div>
+  );
+}
+
+
 function KeysIoPanel(props: {
   t: TranslateFn;
   state: KeysIoState;
@@ -1001,6 +1050,9 @@ export function SenseNovaSection(props: SenseNovaSectionProps): JSX.Element {
   const disabled = !state.writable;
   const savedVisible = useSavedFlash(state.savedCount);
 
+  // 账户列表折叠（v0.2.7）：>8 个默认收起，避免 80 个账户铺满页面。
+  const [accountsCollapsed, setAccountsCollapsed] = useState(true);
+
   // 「清空全部账户」二次确认（3 秒后自动复原，避免误点）。
   const [confirmClear, setConfirmClear] = useState(false);
   useEffect(() => {
@@ -1057,6 +1109,13 @@ export function SenseNovaSection(props: SenseNovaSectionProps): JSX.Element {
 
       {/* 分组 2：凭据与账户 */}
       <SectionHeading text={t('groupCredentials')} />
+
+      {/* Key 池状态（v0.2.7）：当前 key / 下一把 / 池把数 */}
+      <KeyStatusPanel
+        t={t}
+        state={state.keysStatus}
+        onRefresh={props.refreshKeysStatus}
+      />
       <div className="sn-card">
         <div className="sn-field">
           <div className="sn-fieldHead">
@@ -1155,7 +1214,16 @@ export function SenseNovaSection(props: SenseNovaSectionProps): JSX.Element {
           </div>
         </div>
 
-        {accounts.length > 0 ? (
+        {accounts.length > 8 ? (
+          <button
+            type="button"
+            className="sn-btnGhost sn-accountsToggle"
+            onClick={() => setAccountsCollapsed((v) => !v)}
+          >
+            {accountsCollapsed ? t('accountsExpand', { n: accounts.length }) : t('accountsCollapse')}
+          </button>
+        ) : null}
+        {!accountsCollapsed || accounts.length <= 8 ? (
           <div className="sn-accountList">
             {accounts.map((account, index) => (
               <AccountRow

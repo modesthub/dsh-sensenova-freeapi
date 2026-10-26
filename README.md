@@ -8,7 +8,7 @@ dsh-sensenova-freeapi 是一个非官方的 **DeepSeek Harness**（DSH）LLM 提
   <img src="./docs/lockup.png" alt="DeepSeek Harness × SenseNova" width="720">
 </p>
 
-![release](https://img.shields.io/badge/status-0.2.6-3fb950)
+![release](https://img.shields.io/badge/status-0.2.7-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 > 参考实现：[`@mars-sea/dsh-commandcode-provider`](https://github.com/Mars-Sea/dsh-commandcode-provider)（MIT）。本插件只保留多账户连接能力；登录流程、用量面板、套餐窗口、命令行工具均已裁剪。
@@ -229,6 +229,8 @@ Default:sk-...
 > 🧹 **v0.2.5**：新增「清空全部账户」与「清空文本框」按钮。清空是 **staged** 的：二次确认（3 秒内再点）后行立即消失、保存按钮亮起，点「保存」才删除账户并清除对应凭据——误点可用「重置」撤销。
 
 > ⚡ **v0.2.6**：轮换顺序改为**运行时自动交替**（按 label 的「序号→账户」排序）。批量导入产生的顺序排布（账户1 的 20 把全在前）不再影响效率，**既有配置无需重新导入**。实测：交替成功率 72% vs 顺序 50%；限流轮次下均 10 次尝试 vs 16 次。
+
+> 🩺 **v0.2.7**：① Key 池状态指示器（当前 key / 下一把半隐 / 池把数 + 撞 429 切换动画）；② 账户列表折叠（>8 个默认收起）；③ 池 seed 诊断日志 —— 配置账户数与池大小不一致时告警，定位「导入/安装后未重启」的时序竞态。
 
 ---
 

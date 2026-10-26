@@ -90,6 +90,35 @@ export const ERROR_LOG_ROUTE = '/api/sensenova/errorLog';
  */
 export const MODEL_INFO_ROUTE = '/api/sensenova/modelInfo';
 
+// ── Key 池状态（只读，v0.2.7）────────────────────────────────────────────
+
+/**
+ * Key 池状态只读路由。⚠️ 与 host 侧 `keys-status-api.ts` 的 `KEYS_STATUS_ROUTE`
+ * **必须同值** —— client bundle 不能 import host 模块（那里用了 Node 的 Response）。
+ */
+export const KEYS_STATUS_ROUTE = '/api/sensenova/keysStatus';
+
+/** Key 状态快照（client 侧精简视图，字段与 host 同名同义）。 */
+export interface KeysStatusSnapshot {
+  available: boolean;
+  running: number;
+  blocked: number;
+  size: number;
+  currentLabel: string | undefined;
+  currentRef: string | undefined;
+  nextLabel: string | undefined;
+  nextRef: string | undefined;
+}
+
+/**「当前 key」区块状态（只读，不参与 dirty）。 */
+export interface KeysStatusState {
+  status: 'idle' | 'loading' | 'error';
+  snapshot?: KeysStatusSnapshot;
+  error: string;
+  /** 当前 key 变化时短暂亮起（撞 429 换 key 的切换动画）。 */
+  flash: boolean;
+}
+
 // ── Key 导入 / 导出（v0.2.1）──────────────────────────────────────────────
 
 /**
@@ -767,6 +796,8 @@ export interface SettingsState {
   poolPolicyDraft: PoolPolicyDraft;
   /** 「导入 / 导出 Key」区块状态（只读区块，不参与 dirty / 保存流程）。 */
   keysIo: KeysIoState;
+  /**「当前 key」区块状态（只读，v0.2.7）。 */
+  keysStatus: KeysStatusState;
   dirty: boolean;
   saving: boolean;
   failed: boolean;
@@ -908,6 +939,8 @@ export class SenseNovaSettingsController {
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
   /** >0 时挂起凭据刷新（批量导入循环内使用，v0.2.3）。 */
   private suspendCredentialRefresh = 0;
+  /**「当前 key」区块状态（v0.2.7）。 */
+  private keysStatusState: KeysStatusState = { status: 'idle', error: '', flash: false };
 
   private readonly listeners = new Set<() => void>();
   private readonly disposers: Array<() => void> = [];
@@ -1033,6 +1066,7 @@ export class SenseNovaSettingsController {
       poolPolicy,
       poolPolicyDraft: { ...poolPolicy, ...this.stagedPool },
       keysIo: { ...this.keysIo },
+      keysStatus: { ...this.keysStatusState },
       dirty,
       saving: this.saving,
       failed: this.failed,
@@ -1292,6 +1326,46 @@ export class SenseNovaSettingsController {
     } catch {
       // 路由缺失（旧 host / 非 web profile）或网络异常 ⇒ 降级为 error 态。
       this.modelInfoState = { status: 'error' };
+    }
+    this.publish();
+  }
+
+  // ── Key 池状态（v0.2.7）────────────────────────────────────────────
+
+  /**
+   * 拉取 key 池状态（当前 key + 下一把 + 池把数）。
+   *
+   * 与 refreshErrorLog / refreshModelInfo 同约定：不自动轮询、走 HTTP 路由、
+   * 异常降级为 error 态绝不抛。当前 key 变化时置 flash 触发切换动画。
+   */
+  async refreshKeysStatus(): Promise<void> {
+    if (this.keysStatusState.status === 'loading') return;
+    this.keysStatusState = { ...this.keysStatusState, status: 'loading' };
+    this.publish();
+    try {
+      const response = await fetch(KEYS_STATUS_ROUTE, { credentials: 'same-origin' });
+      if (!response.ok) throw new Error(`llm-sensenova: keys status HTTP ${response.status}`);
+      const snapshot = (await response.json()) as KeysStatusSnapshot;
+      const prevLabel = this.keysStatusState.snapshot?.currentLabel;
+      // 撞 429 换 key：currentLabel 变化时短暂亮起切换动画（1.2s）。
+      const flash =
+        prevLabel !== undefined &&
+        snapshot.available &&
+        snapshot.currentLabel !== undefined &&
+        prevLabel !== snapshot.currentLabel;
+      this.keysStatusState = { status: 'idle', snapshot, error: '', flash };
+      if (flash) {
+        setTimeout(() => {
+          this.keysStatusState = { ...this.keysStatusState, flash: false };
+          this.publish();
+        }, 1200);
+      }
+    } catch (error) {
+      this.keysStatusState = {
+        status: 'error',
+        error: error instanceof Error ? error.message : '状态拉取失败',
+        flash: false,
+      };
     }
     this.publish();
   }

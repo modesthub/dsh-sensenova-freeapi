@@ -127,6 +127,14 @@ function injectPageCss(): void {
     '.sn-btnDanger{font-size:12px;line-height:1.4;padding:3px 10px;border-radius:6px;border:1px solid var(--dsw-alias-status-danger,#d93026);background:transparent;color:var(--dsw-alias-status-danger,#d93026);cursor:pointer;white-space:nowrap}',
     '.sn-btnDanger:hover:not(:disabled){background:var(--dsw-alias-status-danger,#d93026);color:#fff}',
     '.sn-btnDanger:disabled{opacity:.5;cursor:not-allowed}',
+    /* Key 池状态面板（v0.2.7） */
+    '.sn-keyStatus{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;border-radius:8px;background:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.06));font-size:12px}',
+    '.sn-keyCurrent{font-weight:600;color:var(--dsw-alias-brand-primary,#3b82f6);padding:2px 8px;border-radius:4px;background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.04))}',
+    '@keyframes sn-keyFlashAnim{0%{transform:scale(1)}40%{transform:scale(1.14);box-shadow:0 0 0 6px rgba(59,130,246,.18)}100%{transform:scale(1);box-shadow:0 0 0 0 rgba(59,130,246,0)}}',
+    '.sn-keyFlash{animation:sn-keyFlashAnim 1.2s ease-out}',
+    '.sn-keyNext{color:var(--dsw-alias-label-tertiary,#8a8a8a);opacity:.55;padding:2px 8px;border-radius:4px;border:1px dashed var(--dsw-alias-border-l2,rgba(127,127,127,.3))}',
+    /* 账户列表折叠按钮（v0.2.7） */
+    '.sn-accountsToggle{font-size:12px;padding:4px 10px;margin-bottom:4px;align-self:flex-start}',
     '.sn-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
     '.sn-error{color:var(--dsw-alias-status-danger,#d93026)}',
     /* 账户列表：行间分隔更清晰 */
@@ -261,6 +269,7 @@ function applyClientSurfaces(ctx: ClientContextLike, credentials: CredentialsFac
     exportKeys: () => void controller.exportKeys(),
     importKeys: () => void controller.importKeys(),
     refreshCredentials: () => void controller.refreshCredentials(),
+    refreshKeysStatus: () => void controller.refreshKeysStatus(),
     clearAllAccounts: () => controller.clearAllAccounts(),
     setRetryMode: (mode: 'normal' | 'always') => controller.setRetryMode(mode),
     editRetry: (field: Parameters<SenseNovaSettingsController['editRetry']>[0], text: string) =>

@@ -72,6 +72,12 @@ export interface KeyPoolSnapshot {
     readonly blockedSince: number
     readonly probeAttempts: number
   }[]
+  /** 上次选中的 key（当前正在使用的；v0.2.7，设置页指示器）。 */
+  readonly currentKey: string | undefined
+  /** 上次选中 key 的下一把运行态 key（半隐形态预览）。 */
+  readonly nextKey: string | undefined
+  /** 总槽位数（运行 + 阻塞，不含被 401 移除的）。 */
+  readonly size: number
 }
 
 /** 构造依赖。 */
@@ -290,6 +296,16 @@ export class SensenovaKeyPool {
 
   /** 只读快照（设置页诊断面板用）。 */
   snapshot(): KeyPoolSnapshot {
+    let nextKey: string | undefined
+    const count = this.running.length
+    // 有当前 key 且池里不止一把时才给出「下一把」预览。
+    if (count > 1 && this.lastPicked !== undefined) {
+      const anchor = this.running.findIndex(entry => entry.key === this.lastPicked)
+      if (anchor >= 0) {
+        const candidate = this.running[(anchor + 1) % count]
+        if (candidate !== undefined && candidate.key !== this.lastPicked) nextKey = candidate.key
+      }
+    }
     return {
       running: this.running.map(entry => entry.key),
       blocked: this.blocked.map(entry => ({
@@ -297,6 +313,9 @@ export class SensenovaKeyPool {
         blockedSince: entry.blockedSince,
         probeAttempts: entry.probeAttempts,
       })),
+      currentKey: this.lastPicked,
+      nextKey,
+      size: this.index.size,
     }
   }
 

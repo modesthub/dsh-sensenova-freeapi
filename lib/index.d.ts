@@ -489,6 +489,12 @@ interface KeyPoolSnapshot {
     readonly blockedSince: number;
     readonly probeAttempts: number;
   }[];
+  /** 上次选中的 key（当前正在使用的；v0.2.7，设置页指示器）。 */
+  readonly currentKey: string | undefined;
+  /** 上次选中 key 的下一把运行态 key（半隐形态预览）。 */
+  readonly nextKey: string | undefined;
+  /** 总槽位数（运行 + 阻塞，不含被 401 移除的）。 */
+  readonly size: number;
 }
 /** 构造依赖。 */
 interface SensenovaKeyPoolDeps {
