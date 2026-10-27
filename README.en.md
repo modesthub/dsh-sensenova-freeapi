@@ -31,13 +31,13 @@ https://github.com/modesthub/dsh-sensenova-freeapi
 ```
 
 3. Confirm the install, then **restart DSH** so the plugin takes effect
-4. The **plugin detail page** shows the installed version (this README ships with **v0.2.7**)
+4. The **plugin detail page** shows the installed version (this README ships with **v0.2.9**)
 
 ### Updating
 
 - Paste the **same address again** in the install screen (or uninstall and reinstall) to pull the latest code
 - **Restart DSH** afterwards; the version shown on the plugin detail page changes — the simplest way to confirm the update landed
-- To pin a version, append a tag: `https://github.com/modesthub/dsh-sensenova-freeapi#v0.2.7`
+- To pin a version, append a tag: `https://github.com/modesthub/dsh-sensenova-freeapi#v0.2.9`
 
 ### Command line (alternative)
 
@@ -341,6 +341,26 @@ Oldest → newest. See “Rotation” and “Why it runs stably” above for the
 - 🩺 **v0.2.7**: (1) key pool status indicator (current key / next key dimmed / pool counts + a flash animation on 429 rotation); (2) account list collapses when there are more than 8; (3) seed diagnostics warn when the configured account count disagrees with the pool size — pinpoints the “install/import without restart” ordering race.
 
 > 🐛 **Fixed in v0.2.8 — “80 accounts but stuck on Default”**: the root cause was a lost `quotaRotation` config falling back to its `false` default, so 429s neither switched keys nor reported pool state. Fixes: (1) the flag now **defaults to on** (only an explicit `false` disables it), matching `errorLog` semantics; (2) pool state is reported **unconditionally** on 429; (3) the error log gained a `quotaRotation` field so “switch is off” is distinguishable from “no keys to switch to”.
+
+> ⚙️ **v0.2.9 — `connectRetry` is now actually wired up** (the config entry for in-plugin 429 waiting).
+>
+> **Background**: `connectRetry` has had a type, docs and unit tests since v0.2.0, but `index.ts`'s `options()` **never passed it to the adapter** and `ConfigSchema` had no such field ⇒ the hard-coded default (`maxRetries = 1`) was always in effect, and there was **no way to turn the "wait 15 s on 429" behaviour off**.
+>
+> **Fix**: added the `connectRetry` config entry (schema + normalizer + dispatch). Configure it in the profile patch:
+>
+> ```yaml
+> connectRetry:
+>   maxRetries: 0     # 0 = no wait, rotate immediately on 429 ("fast draw")
+>   waitMs: 2000      # optional: replaces the per-model wait table
+>   modelWaitMs:      # optional: per-model override
+>     deepseek-flash: 15000
+> ```
+>
+> **Measured** (3 keys, all returning 429): `maxRetries: 0` ⇒ 4 requests in **23 ms**; `maxRetries: 1` (default) ⇒ the same 4 requests take **15,014 ms**. The delta is the 15 s in-place wait.
+>
+> ⚠️ `maxRetries: 0` makes rotation storms easier to saturate (one try per key, up to 80 requests per round with an 80-slot config). A 13-minute session on 2026-10-27 produced **822 429 events** with `attempt` spanning 1–80. Tune it together with the key-pool capacity.
+>
+> ⚠️ Note: `internalRetries` is a **per-`stream()`** counter, not per-key — each key waits at most once per round, and the second 429 moves to the next key.
 
 ---
 

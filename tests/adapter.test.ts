@@ -1708,3 +1708,53 @@ test('connectRetry: 未显式配 maxRetries 时默认只重试 1 次', async () 
   await assert.rejects(collect(adapter, OPTIONS));
   assert.equal(calls, 2, '1 次首发 + 1 次默认原地重试');
 });
+
+// ── v0.2.9：maxRetries=0「不等直接换 key」──────────────────────────────────
+
+test('connectRetry: maxRetries=0 时不等，首发 429 立刻换 key', async () => {
+  const seq: string[] = [];
+  let rotated = 0;
+  const adapter = new SensenovaAdapter({
+    options: () => ({
+      ...CONNECTION,
+      accountCount: 3,
+      quotaRotation: true,
+      connectRetry: { maxRetries: 0 },
+    }),
+    resolveApiKey: async () => 'k1',
+    rotateApiKey: async () => {
+      rotated += 1;
+      return 'k' + (rotated + 1);
+    },
+    fetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      seq.push(String((init?.headers as Record<string, string>).authorization).replace('Bearer ', ''));
+      return new Response('rate limited', { status: 429 });
+    }) as typeof fetch,
+  });
+
+  const t0 = Date.now();
+  await assert.rejects(collect(adapter, OPTIONS));
+  const elapsed = Date.now() - t0;
+
+  // 一次都不该等：整轮（含 3 次轮换）必须在毫秒级完成。
+  assert.ok(elapsed < 1_000, `maxRetries=0 不应等待，实际 ${elapsed}ms`);
+  // 每把 key 只出现一次（没有原地重试），且轮换确实发生。
+  assert.equal(seq[0], 'k1', '首击用 k1');
+  assert.equal(new Set(seq).size, seq.length, '每把 key 只试一次（无原地重试）');
+  assert.ok(rotated >= 1, '首发 429 后立刻轮换');
+});
+
+test('connectRetry: maxRetries=0 且 quotaRotation 关闭时只有一个请求', async () => {
+  let calls = 0;
+  const adapter = new SensenovaAdapter({
+    options: () => ({ ...CONNECTION, quotaRotation: false, connectRetry: { maxRetries: 0 } }),
+    resolveApiKey: async () => 'k1',
+    rotateApiKey: async () => undefined,
+    fetchImpl: (async () => {
+      calls += 1;
+      return new Response('rate limited', { status: 429 });
+    }) as typeof fetch,
+  });
+  await assert.rejects(collect(adapter, OPTIONS));
+  assert.equal(calls, 1, '既不等待也不换 key ⇒ 只发一次请求');
+});

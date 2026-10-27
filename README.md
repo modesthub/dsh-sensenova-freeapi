@@ -31,13 +31,13 @@ https://github.com/modesthub/dsh-sensenova-freeapi
 ```
 
 3. 确认安装，然后**重启 DSH** 使插件生效
-4. 安装后可在**插件详情页**看到当前版本号（本 README 对应 **v0.2.7**）
+4. 安装后可在**插件详情页**看到当前版本号（本 README 对应 **v0.2.9**）
 
 ### 更新到最新版
 
 - 在插件安装界面**重新输入同一个地址**（或先卸载再安装）即可拉取最新代码
 - 更新后**重启 DSH**，插件详情页的版本号会随之变化 —— 这是确认是否更新成功最直接的方式
-- 想固定到某个版本，可在地址后追加 tag，例如 `https://github.com/modesthub/dsh-sensenova-freeapi#v0.2.7`
+- 想固定到某个版本，可在地址后追加 tag，例如 `https://github.com/modesthub/dsh-sensenova-freeapi#v0.2.9`
 
 ### 命令行安装（备选）
 
@@ -341,6 +341,26 @@ pnpm test         # node --import tsx --test tests/**/*.test.ts
 - 🩺 **v0.2.7**：① Key 池状态指示器（当前 key / 下一把半隐 / 池把数 + 撞 429 切换动画）；② 账户列表折叠（>8 个默认收起）；③ 池 seed 诊断日志 —— 配置账户数与池大小不一致时告警，定位「导入/安装后未重启」的时序竞态。
 
 > 🐛 **v0.2.8 修复「80 账户一直卡在 Default」**：根因是 `quotaRotation` 配置丢失后取到缺省 `false` —— 429 既不换 key、也不上报池状态。修复：① 该开关改为**默认开启**（只有显式 `false` 才关闭），与 `errorLog` 同语义；② 429 时**无条件**上报池状态（`poolRunning/poolBlocked` 不再依赖开关）；③ 错误记录新增 `quotaRotation` 字段，一眼区分「开关关了」与「池里没 key」。
+
+> ⚙️ **v0.2.9：接通 `connectRetry`（429 原地等待的配置入口）**
+>
+> **背景**：`connectRetry` 自 v0.2.0 起就有类型、有注释、有单测，但 `index.ts` 的 `options()` **从未下发它**，`ConfigSchema` 也没有对应字段 ⇒ 生产环境永远读不到，行为恒为代码默认值（`maxRetries = 1`）。用户想关掉"撞 429 先等 15 秒"这件事**没有任何入口**。
+>
+> **修复**：新增 `connectRetry` 配置项（schema + 归一化 + 下发三处接线），可在 profile patch 或设置页配置：
+>
+> ```yaml
+> connectRetry:
+>   maxRetries: 0     # 0 = 不等，撞 429 直接换 key（"极速抽签"模式）
+>   waitMs: 2000      # 可选：自定义等待，替代按模型表取值
+>   modelWaitMs:      # 可选：按模型覆盖
+>     deepseek-flash: 15000
+> ```
+>
+> **实测效果**（3 把 key 全 429）：`maxRetries: 0` ⇒ 4 次请求 **23 ms** 完成；`maxRetries: 1`（默认）⇒ 同样 4 次请求需 **15,014 ms**。两者差值就是那 15 秒原地等待。
+>
+> ⚠️ **注意**：`maxRetries: 0` 会让轮换风暴更容易打满（每把 key 试一次即换，80 槽位配置下最坏一轮 80 个请求）。实测 2026-10-27 一次 13 分钟会话产生 **822 条 429**、`attempt` 铺满 1~80。请结合「Key 池容量」与账户结构一起调。
+>
+> ⚠️ 另注：`internalRetries` 是 **`stream()` 级**计数（整轮共享一份预算），不是 per-key —— 同一把 key 只会等一次，第二次撞 429 即换 key。
 
 ---
 

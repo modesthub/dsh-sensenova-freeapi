@@ -135,6 +135,25 @@ export interface SensenovaConfig {
    */
   poolPolicy?: KeyPoolParams;
   /**
+   * 撞 429 后「插件内原地等待重试」的配置（v0.2.9 接线，此前只有类型没有入口）。
+   *
+   * - `maxRetries: 0` ⇒ **不等，直接换 key**（测试用模式）；
+   * - 缺省 1 ⇒ 同一把 key 等 1 次再换（v0.2.8 现状）；
+   * - `waitMs` / `modelWaitMs` 控制等待时长，未配时按模型取
+   *   `MODEL_CONNECT_RETRY_WAIT_MS`（deepseek-flash 15s / v4-flash 10s / 其它 10s）。
+   *
+   * ⚠️ 计数是 **`stream()` 级**（整轮共享一份预算），不是 per-key ——
+   * 详见 `adapter.ts` 的 `internalRetries` 注释。
+   */
+  connectRetry?: {
+    /** 同一轮内最多原地等几次；0 = 不等直接换 key。 */
+    maxRetries?: number;
+    /** 全局缺省等待（毫秒）；未配 modelWaitMs 时作为兜底。 */
+    waitMs?: number;
+    /** 按模型 id 覆盖等待（毫秒），优先级高于 waitMs。 */
+    modelWaitMs?: Record<string, number>;
+  };
+  /**
    * L2 连接级请求参数默认值（2026-09-23 新增）。
    *
    * 宿主 `GenerateOptions` 只允许传 12 个字段
@@ -239,6 +258,13 @@ const ConfigSchema = z.object({
     probeBackoffFactor: z.number().min(1).max(10).default(DEFAULT_KEY_POOL_PARAMS.probeBackoffFactor),
     probeMaxMs: z.natural().min(1_000).max(600_000).default(DEFAULT_KEY_POOL_PARAMS.probeMaxMs),
     capacity: z.natural().min(1).max(100).default(DEFAULT_KEY_POOL_PARAMS.capacity),
+  }).volatile(),
+  // 429 原地等待配置（v0.2.9 接线）。与 poolPolicy 同一范式：嵌套对象整体 .volatile()。
+  // maxRetries 允许 0（= 不等直接换 key），这是本插件的「极速抽签」模式。
+  connectRetry: z.object({
+    maxRetries: z.natural().min(0).max(100).default(1),
+    waitMs: z.natural().min(1).max(600_000),
+    modelWaitMs: z.dict(z.natural().min(1).max(600_000)),
   }).volatile(),
   // L2 连接级请求参数默认值（2026-09-23 新增）。
   //
@@ -381,6 +407,8 @@ export interface ResolvedSensenovaOptions {
   retryPolicy: ResolvedRetryPolicy;
   /** 已归一化的 key 池策略（永不 undefined：缺省取 DEFAULT_KEY_POOL_PARAMS）。 */
   poolPolicy: KeyPoolParams;
+  /** 已归一化的 429 原地等待配置（永不 undefined：缺省 maxRetries=1）。 */
+  connectRetry: NormalizedConnectRetry;
   /** 限流事件记录器开关（默认 true）。 */
   errorLog: boolean;
   /**
@@ -434,6 +462,54 @@ export function normalizePoolPolicy(value: unknown): KeyPoolParams {
     probeBackoffFactor: backoff >= 1 && backoff <= 10 ? backoff : DEFAULT_KEY_POOL_PARAMS.probeBackoffFactor,
     probeMaxMs: Math.max(probeMaxMs, probeInitialMs),
     capacity: clampInt(raw.capacity, 1, 100, DEFAULT_KEY_POOL_PARAMS.capacity),
+  };
+}
+
+/** 归一化后的 429 原地等待配置（永不 undefined）。 */
+export interface NormalizedConnectRetry {
+  /** 同一轮内最多原地等几次；0 = 不等直接换 key。 */
+  maxRetries: number;
+  /** 全局缺省等待（毫秒）；未配置为 undefined（= 按模型表取）。 */
+  waitMs?: number;
+  /** 按模型覆盖的等待（只保留合法正数项）。 */
+  modelWaitMs?: Record<string, number>;
+}
+
+/**
+ * 归一化 429 原地等待配置（v0.2.9）。
+ *
+ * 约定与其它归一化助手一致：**非法值回退缺省，绝不抛**。
+ * - `maxRetries` 缺失/非法 ⇒ 1（v0.2.8 现状，保持向后兼容）；
+ * - `maxRetries: 0` **是合法值** ⇒ 不等直接换 key（这是本函数最容易写错的地方：
+ *   `typeof x === 'number'` 判断必须允许 0，不能用 `||` 兜底）；
+ * - `waitMs` / `modelWaitMs` 只保留 > 0 的有限数。
+ */
+export function normalizeConnectRetry(value: unknown): NormalizedConnectRetry {
+  const raw = (typeof value === 'object' && value !== null ? value : {}) as {
+    maxRetries?: unknown;
+    waitMs?: unknown;
+    modelWaitMs?: unknown;
+  };
+  const rawMax = raw.maxRetries;
+  const maxRetries = typeof rawMax === 'number' && Number.isInteger(rawMax) && rawMax >= 0 && rawMax <= 100
+    ? rawMax
+    : 1;
+  const waitMs = typeof raw.waitMs === 'number' && Number.isFinite(raw.waitMs) && raw.waitMs > 0
+    ? Math.floor(raw.waitMs)
+    : undefined;
+  let modelWaitMs: Record<string, number> | undefined;
+  if (typeof raw.modelWaitMs === 'object' && raw.modelWaitMs !== null && !Array.isArray(raw.modelWaitMs)) {
+    const out: Record<string, number> = {};
+    for (const [model, ms] of Object.entries(raw.modelWaitMs as Record<string, unknown>)) {
+      if (model === '' || typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) continue;
+      out[model] = Math.floor(ms);
+    }
+    if (Object.keys(out).length > 0) modelWaitMs = out;
+  }
+  return {
+    maxRetries,
+    ...(waitMs !== undefined ? { waitMs } : {}),
+    ...(modelWaitMs !== undefined ? { modelWaitMs } : {}),
   };
 }
 
@@ -573,6 +649,8 @@ export function resolveAdapterOptions(config: SensenovaConfig): ResolvedSensenov
     errorLog: config.errorLog !== false,
     // key 池策略（2026-09-27）：逐字段钳制，缺省取 DEFAULT_KEY_POOL_PARAMS。
     poolPolicy: normalizePoolPolicy(config.poolPolicy),
+    // 429 原地等待配置（v0.2.9）：缺省 maxRetries=1（保持 v0.2.8 行为）。
+    connectRetry: normalizeConnectRetry(config.connectRetry),
     // L2 连接级请求参数默认值（2026-09-23）。未配置时为空对象 ⇒ 不注入任何字段。
     requestParams: normalizeRequestParams(config.requestParams),
     ...(modelSelection !== undefined ? { modelSelection } : {}),
@@ -741,6 +819,8 @@ export function apply(ctx: Context, config: SensenovaConfig): void {
         quotaRotation: resolved.quotaRotation,
         // 重试策略随连接事实一起下发（adapter 的 providerRetryPolicy 读它）。
         retryPolicy: resolved.retryPolicy,
+        // 429 原地等待配置（v0.2.9）：不接线时 adapter 只能读到 undefined ⇒ 永远走代码默认 1 次。
+        connectRetry: resolved.connectRetry,
         // L2 连接级请求参数默认值（2026-09-23）：adapter 在每请求时按模型白名单过滤。
         requestParams: resolved.requestParams,
         ...(resolved.modelSelection !== undefined ? { modelSelection: resolved.modelSelection } : {}),
