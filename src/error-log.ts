@@ -72,8 +72,22 @@ export interface SenseNovaRateLimitEvent {
   retryAfterHeaderMs?: number;
   /** 最终抛给宿主的退避（含单向上抖）；轮换路径（不抛出）时缺省。 */
   providerRetryAfterMs?: number;
-  /** 本次是否触发了 key 轮换。 */
+  /**
+   * 本次是否触发了 key 轮换。
+   *
+   * ⚠️ v0.2.8：与 {@link quotaRotation} 对照看 —— `rotated: false` 且
+   * `quotaRotation: false` 表示**轮换被功能开关关掉了**（配置丢失的典型现场）；
+   * 两者都是 true 却仍不换，才是池里没有可换的 key。
+   */
   rotated: boolean;
+  /**
+   * 本次请求时「配额类 429 换 key」开关的生效值（v0.2.8 新增）。
+   *
+   * 🔴 2026-10-27 实测加此项：配置丢失导致该开关静默降级为 false 时，
+   * 旧日志里 `poolRunning/poolBlocked` 整列为空、`rotated` 恒为 false，
+   * 现场「80 个账户却一直卡在 Default」缺少可直接判读的证据。
+   */
+  quotaRotation?: boolean;
   /** 本轮 `stream()` 内第几个 internal attempt（1 起）。 */
   attempt: number;
   /** key 指纹（sha256 前 8 位），**不是 key 原文**。 */

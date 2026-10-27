@@ -1588,10 +1588,12 @@ test('stream: quotaRotation 环回无新 key 时档位跨 key 递增（退避不
   assertRetryFloor(await floorOf(), 5_000, '第 2 次调用升到 5s（轮换未清零档位）');
 });
 
-test('resolveAdapterOptions: quotaRotation 缺省 false，显式 true 透传', () => {
-  assert.equal(resolveAdapterOptions({}).quotaRotation, false);
+test('resolveAdapterOptions: quotaRotation 缺省开，仅显式 false 关闭（v0.2.8）', () => {
+  // 2026-10-27 实测修订：旧语义「缺省 false」会让配置丢失时静默降级 ——
+  // 429 既不换 key 也不上报池状态，现场表现为「80 个账户却一直卡在 Default」。
+  assert.equal(resolveAdapterOptions({}).quotaRotation, true, '缺省开启');
   assert.equal(resolveAdapterOptions({ quotaRotation: true }).quotaRotation, true);
-  assert.equal(resolveAdapterOptions({ quotaRotation: false }).quotaRotation, false);
+  assert.equal(resolveAdapterOptions({ quotaRotation: false }).quotaRotation, false, '显式 false 才关闭');
 });
 
 test('resolveAdapterOptions: errorLog 缺省开，仅显式 false 关闭（W4）', () => {

@@ -221,7 +221,7 @@ const ConfigSchema = z.object({
   concurrency: z.natural().min(1).default(1).volatile(),
   queueTimeoutMs: z.natural().min(1_000).default(DEFAULT_QUEUE_TIMEOUT_MS).volatile(),
   // 高级设置：「配额类 429 换 key」，默认关（design D5：尊重既有「429 不换 key」决策）。
-  quotaRotation: z.boolean().default(false).volatile(),
+  quotaRotation: z.boolean().default(true).volatile(),
   // 重试策略（2026-09-17 W1）：可配置，改完保存即生效（无需重建/重启）。
   //
   // ⚠️ 用本地的 `RetryPolicyFieldsSchema` 而非官方 `RetryPolicySchema`——
@@ -558,7 +558,12 @@ export function resolveAdapterOptions(config: SensenovaConfig): ResolvedSensenov
     concurrency: normalizeConcurrency(config.concurrency),
     queueTimeoutMs: normalizeQueueTimeout(config.queueTimeoutMs),
     // 防御非布尔输入（程序化构造可能绕过 Schemastery 归一化）。
-    quotaRotation: config.quotaRotation === true,
+    // v0.2.8：改为「只有显式 false 才关闭」。
+    // 原因（2026-10-27 实测）：配置一旦丢失（patch 被重写、向导覆盖），旧的
+    // `=== true` 会静默降级为 false ⇒ 429 既不换 key 也不上报池状态，
+    // 表现为「80 个账户却一直卡在 Default」。换 key 是低成本高收益的默认行为，
+    // 缺省应开启；想关掉必须显式写 false。
+    quotaRotation: config.quotaRotation !== false,
     // 重试策略：先逐层合并缺省值（防悬崖不变量），再交给官方解析器校验并冻结。
     retryPolicy: resolveRetryPolicy(
       mergeRetryPolicy(config.retryPolicy),

@@ -8,7 +8,7 @@ dsh-sensenova-freeapi 是一个非官方的 **DeepSeek Harness**（DSH）LLM 提
   <img src="./docs/lockup.png" alt="DeepSeek Harness × SenseNova" width="720">
 </p>
 
-![release](https://img.shields.io/badge/status-0.2.7-3fb950)
+![release](https://img.shields.io/badge/status-0.2.8-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 > ⚠️ **如果插件安装出现问题**：用**无插件模式**进入 DSH，然后用**大肥鱼**修一下，最多 **0.5 元**可以搞定。
@@ -339,6 +339,8 @@ pnpm test         # node --import tsx --test tests/**/*.test.ts
 - 🧹 **v0.2.5**：新增「清空全部账户」与「清空文本框」按钮。清空是 **staged** 的：二次确认（3 秒内再点）后行立即消失、保存按钮亮起，点「保存」才删除账户并清除对应凭据——误点可用「重置」撤销。
 - ⚡ **v0.2.6**：轮换顺序改为**运行时自动交替**（按 label 的「序号→账户」排序）。批量导入产生的顺序排布（账户1 的 20 把全在前）不再影响效率，**既有配置无需重新导入**。实测：交替成功率 72% vs 顺序 50%；限流轮次下均 10 次尝试 vs 16 次。
 - 🩺 **v0.2.7**：① Key 池状态指示器（当前 key / 下一把半隐 / 池把数 + 撞 429 切换动画）；② 账户列表折叠（>8 个默认收起）；③ 池 seed 诊断日志 —— 配置账户数与池大小不一致时告警，定位「导入/安装后未重启」的时序竞态。
+
+> 🐛 **v0.2.8 修复「80 账户一直卡在 Default」**：根因是 `quotaRotation` 配置丢失后取到缺省 `false` —— 429 既不换 key、也不上报池状态。修复：① 该开关改为**默认开启**（只有显式 `false` 才关闭），与 `errorLog` 同语义；② 429 时**无条件**上报池状态（`poolRunning/poolBlocked` 不再依赖开关）；③ 错误记录新增 `quotaRotation` 字段，一眼区分「开关关了」与「池里没 key」。
 
 ---
 

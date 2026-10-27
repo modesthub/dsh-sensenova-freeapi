@@ -8,7 +8,7 @@ dsh-sensenova-freeapi is an unofficial **DeepSeek Harness** (DSH) LLM provider p
   <img src="./docs/lockup.png" alt="DeepSeek Harness × SenseNova" width="720">
 </p>
 
-![release](https://img.shields.io/badge/status-0.2.7-3fb950)
+![release](https://img.shields.io/badge/status-0.2.8-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 > ⚠️ **If the plugin fails to install**: enter DSH through **plugin-less mode**, then repair it with **Da Fei Yu (大肥鱼)** — it costs at most **¥0.5**.
@@ -339,6 +339,8 @@ Oldest → newest. See “Rotation” and “Why it runs stably” above for the
 - 🧹 **v0.2.5**: added “Clear all accounts” and “Clear box”. Clearing is **staged**: after a second click within 3 s the rows disappear and Save lights up; pressing Save deletes the accounts and unsets their credentials. “Reset” undoes it.
 - ⚡ **v0.2.6**: rotation order is now **interleaved at runtime** (sorted by the label's “slot → account” pair). Sequential orders produced by bulk import no longer hurt throughput — **no need to re-import existing configs**. Measured: 72% vs 50% success; on throttled rounds 10 vs 16 attempts.
 - 🩺 **v0.2.7**: (1) key pool status indicator (current key / next key dimmed / pool counts + a flash animation on 429 rotation); (2) account list collapses when there are more than 8; (3) seed diagnostics warn when the configured account count disagrees with the pool size — pinpoints the “install/import without restart” ordering race.
+
+> 🐛 **Fixed in v0.2.8 — “80 accounts but stuck on Default”**: the root cause was a lost `quotaRotation` config falling back to its `false` default, so 429s neither switched keys nor reported pool state. Fixes: (1) the flag now **defaults to on** (only an explicit `false` disables it), matching `errorLog` semantics; (2) pool state is reported **unconditionally** on 429; (3) the error log gained a `quotaRotation` field so “switch is off” is distinguishable from “no keys to switch to”.
 
 ---
 

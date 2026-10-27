@@ -2109,21 +2109,26 @@ export class SensenovaAdapter extends LlmAdapter {
         // 上报返回值同时带回「本事件发生时池的两态把数」，用于限流事件的诊断字段。
         let kickedThisAttempt = false;
         let poolStateThisAttempt: { running: number; blocked: number } | undefined;
+        // 🔴 v0.2.8：池状态上报改为**无条件**（不再包在 `if (quotaRotation)` 里）。
+        //
+        // 原因（2026-10-27 实测）：配置丢失导致 quotaRotation 取到缺省 false 时，
+        // 旧代码连 `poolRunning/poolBlocked` 都不写 ⇒ 错误记录里该字段整列为 undefined，
+        // 现场表现为「80 个账户却一直卡在 Default」却没有任何池侧证据可查。
+        // 上报本身只是读快照（不轮换、不改相位），无条件执行才能让诊断字段始终可用；
+        // 「该不该换 key」仍由下方 `quotaRotate` 单独判定。
         if (classified.kind === 'tpm') {
           // W3：档位取入口快照（本轮内所有 internal attempt 共用同一档，不再就地递增）。
           dynamicFloorMs = entryProbeFloorMs;
           probeHitThisCall = true;
-          if (quotaRotation) {
-            const reported = this.deps.reportRateLimit?.(apiKey, 'tpm');
-            kickedThisAttempt = reported?.kicked === true;
-            poolStateThisAttempt = reported;
-          }
+          const reported = this.deps.reportRateLimit?.(apiKey, 'tpm');
+          kickedThisAttempt = reported?.kicked === true;
+          poolStateThisAttempt = reported;
         } else if (classified.kind === 'rpm') {
           // 请求数限流走**独立**档位（上限 30s）：秒级窗口等 120s 没有收益（2026-09-24）。
           dynamicFloorMs = entryRpmFloorMs;
           rpmHitThisCall = true;
-          if (quotaRotation) poolStateThisAttempt = this.deps.reportRateLimit?.(apiKey, 'rpm');
-        } else if (classified.kind === 'rate' && quotaRotation) {
+          poolStateThisAttempt = this.deps.reportRateLimit?.(apiKey, 'rpm');
+        } else {
           poolStateThisAttempt = this.deps.reportRateLimit?.(apiKey, 'rate');
         }
         // W4：把这次限流落成一条结构化事件（异步、不阻塞、绝不抛）。
@@ -2162,6 +2167,7 @@ export class SensenovaAdapter extends LlmAdapter {
               ? { poolRunning: poolStateThisAttempt.running, poolBlocked: poolStateThisAttempt.blocked }
               : {}),
             rotated: outcome.rotated,
+            quotaRotation,
             attempt: attemptIndex,
             account: fingerprint(apiKey),
             // 🔴 2026-09-27 新增两个**可读**字段（设置页「错误记录」新增两列）：
