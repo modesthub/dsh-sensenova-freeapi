@@ -193,6 +193,183 @@ declare class SenseNovaErrorLog {
   private append;
 }
 //#endregion
+//#region src/group-pool.d.ts
+/** 组粒度调度配置（v0.5 §5 参数映射表的插件侧副本）。 */
+interface GroupSchedulingConfig {
+  /** 总开关（默认 true；false 时组调度整体退化为原 key 池路径）。 */
+  enabled?: boolean;
+  /** 组退避底数（毫秒），默认 90_000（st-rotator cooldown baseTime=90s）。 */
+  cooldownBaseMs?: number;
+  /** 组退避指数，默认 2（st-rotator cooldown factor=2）。 */
+  cooldownFactor?: number;
+  /** 组退避上限（毫秒），默认 300_000（st-rotator cooldown maxTime=300s）。 */
+  cooldownMaxMs?: number;
+  /** 退避抖动比例，默认 0.5（`× (1 + U(0, jitter))`）。 */
+  cooldownJitter?: number;
+  /** AIMD 组间隙初始值（毫秒），默认 2_000。 */
+  initialGroupGapMs?: number;
+  /** AIMD 组间隙下限（毫秒），默认 500。 */
+  groupGapMinMs?: number;
+  /** AIMD 组间隙上限（毫秒），默认 30_000。 */
+  groupGapMaxMs?: number;
+  /** 撞 429 时组间隙的乘性放大，默认 1.5。 */
+  groupGapMultiplier?: number;
+  /** 无 429 恢复窗口内组间隙的乘性衰减，默认 0.95。 */
+  groupGapRecoverFactor?: number;
+  /** 「连续无 429」判定窗口（毫秒），默认 8_000。 */
+  recoverWindowMs?: number;
+  /** 全池冷却时的快返 Retry-After（毫秒），默认 8_000（acquire_fail_fast=8 秒）。 */
+  failFastMs?: number;
+}
+/** resolved 配置（缺省值全部补齐）。 */
+type ResolvedGroupScheduling = Required<GroupSchedulingConfig>;
+/** 单个组的运行时状态。 */
+interface KeyGroup {
+  index: number;
+  keys: readonly string[];
+  /** 组冷却截止（epoch ms）；0 表示未在冷却。整组退避用。 */
+  cooldownUntil: number;
+  /** 组内累计 429 次数（成功清零，退避公式的 n）。 */
+  strikes: number;
+  /** 在途（pending）请求数：>0 时该组即使冷却也算可用（pending_cooldown 语义）。 */
+  pending: number;
+  /** 组内游标：并发请求在组内轮转着拿不同 key（每账户一把）。 */
+  lastKeyIndex: number;
+  /** 账户级联动：accountId → 该账户在组内的冷却截止。 */
+  accountCooldown: Map<string, number>;
+}
+/** snapshot(): 对外只读快照的组列表。 */
+interface KeyGroupSnapshot extends KeyGroup {}
+/** watchKey 的返回：adapter 判定全池冷却/日志 groupIndex 用。 */
+interface KeyGroupInfo {
+  groupIndex: number;
+  /** 本组可并发额度 = 组内 key 数（每账户一把 ⇒ 即账户数 A）。 */
+  capacity: number;
+  allCooled: boolean;
+}
+/** reportRateLimit 的返回：调用方（adapter/index）用于日志与轮换。 */
+interface GroupRateLimitReport {
+  groupIndex: number;
+  cooldownUntil: number;
+  strikes: number;
+}
+/** reportRateLimit 的输入上下文（adapter 上报分类时并不知道账户归属，由 index 接线补全）。 */
+interface GroupRateLimitInput {
+  /** 触发 429 的 key 原文。 */
+  key: string;
+  kind: 'tpm' | 'rpm' | 'rate' | 'quota_exhausted';
+}
+interface SensenovaGroupPoolDeps {
+  /** 每操作读一次配置（改配置即生效，无需重建池）。 */
+  config: () => GroupSchedulingConfig | undefined;
+  /** 可注入时钟（测试用）；缺省 Date.now。 */
+  now?: () => number;
+  /** 可注入随机源（测试用）；缺省 Math.random。 */
+  random?: () => number;
+}
+/**
+ * 组池：组游标轮换 + 账号级联动冷却 + 全池冷却判定。
+ *
+ * 线程模型：所有方法同步（除 seed 的幂等建组）；并发安全由调用方保证
+ * （host 侧所有请求都过 Cordis 事件循环，天然串行）。
+ */
+declare class SensenovaGroupPool {
+  #private;
+  private readonly cfg;
+  private readonly now;
+  private readonly random;
+  private groups;
+  /** key → 组索引。 */
+  private readonly keyToGroup;
+  /** key → 账户 id（联动冷却：同一账户的所有 key 所在组一起冷却）。 */
+  private readonly keyToAccount;
+  /** 账户 id → 该账户全部 key。 */
+  private readonly accountKeys;
+  /** 组游标（下一请求优先考虑的组；pickNext 环回推进）。 */
+  private cursor;
+  constructor(deps: SensenovaGroupPoolDeps);
+  /** 当前生效配置的只读视图（供外部同源读取 gap 初值等）。 */
+  get config(): ResolvedGroupScheduling;
+  /**
+   * 建组并登记 key→组/账户映射（幂等：已在的组只更新 keys）。
+   *
+   * @param groups - 组内 key 列表（每组合计 A 把，即组容量）。
+   * @param accountOf - key → 账户 id；同一账户的 key 分属不同组时，联动冷却会把
+   *   它们各自所在的组**全部**冷却（账号级联动的实现基础）。
+   */
+  seed(groups: readonly (readonly string[])[], accountOf?: (key: string) => string | undefined): string[];
+  /** 组数。 */
+  get size(): number;
+  /**
+   * 选中「下一把可用 key」：从游标开始环回。
+   *   - pickStart（并发交错）：停留在当前组，组内轮转取可用 key；
+   *   - pickNext（轮换语义）：跳到下一可用组落位；
+   *   两组都会跳过「整组冷却且无在途」的组与「账户级冷却」的 key；
+   *   全池无可用 key → undefined（调用方走 fail-fast 快返路径）。
+   */
+  pickStart(exclude?: ReadonlySet<string>): string | undefined;
+  /** 推进组游标到下一可用组（轮换到下一组，避免同一账户连续撞 429 空转）。 */
+  pickNext(exclude?: ReadonlySet<string>): string | undefined;
+  /**
+   * 查询某 key 的组上下文（adapter 日志与全池冷却快返判定用）。
+   *
+   * @returns undefined=该 key 不属任何组（配置关闭或未 seed）⇒ 调用方走原 keyPool 路径。
+   */
+  watchKey(key: string): KeyGroupInfo | undefined;
+  /**
+   * 上报一次限流（组粒度，双层退避）：
+   *   1. **本组整组冷却**（组内 all keys 一并冷却，strikes 按组累计，时长走组退避公式）；
+   *   2. **账户级联动**：该账户分在其他组的 key 被标记账户级冷却（时长取组退避第一档，
+   *      不再按他们各自的组 strikes 重复翻倍）——防止「换组后同一账户再撞 429」空转。
+   * 返回本次命中的组信息（供 adapter/index 日志与轮换）。
+   */
+  reportRateLimit(input: GroupRateLimitInput): GroupRateLimitReport;
+  /** 在途请求计数（pending_cooldown：在途请求会造成瞬时压力，不应在它还在飞时判冷却）。 */
+  markPending(key: string, delta: 1 | -1): void;
+  /**
+   * 成功是池已恢复的最强证据：清除本组整组冷却与连击，并**对称地**清除该账户
+   * 在所有组的账户级冷却（该账户能打出成功 ⇒ 账户已恢复，兄弟组里对它的标记一并撤销）。
+   */
+  onSuccess(key: string): void;
+  /** 401 永久移除：从组内摘除该 key（组仍保留其余 key）。 */
+  remove(key: string): void;
+  /** 只读快照（日志/测试）。 */
+  groupsSnapshot(): KeyGroupSnapshot[];
+  /** key → 组索引（供 adapter 构造 gate 键等）。 */
+  groupIndexOf(key: string): number | undefined;
+  /** 是否启用组调度（外部 read 用）。 */
+  enabled(): boolean;
+}
+/**
+ * AIMD 组间隙控制器（方向 2）：
+ *   gap₀ = initialGroupGapMs；
+ *   任何组撞 429 → gap = min(gap × groupGapMultiplier, groupGapMaxMs)；
+ *   距上次 429 超过 recoverWindowMs 且发生一次成功 → gap = max(gap × groupGapRecoverFactor, groupGapMinMs)。
+ */
+declare class GroupGapController {
+  private readonly cfg;
+  private readonly now;
+  private gap;
+  private lastHitAt;
+  private lastDecayAt;
+  constructor(deps: {
+    config: () => GroupSchedulingConfig | undefined;
+    now?: () => number;
+  });
+  /** 当前目标组间隙（毫秒）。 */
+  gapMs(): number;
+  /** 撞 429：放大组间隙（上限封顶），记录本次撞击时间。 */
+  recordHit(now?: number): number;
+  /**
+   * 成功：距上次 429 超过 recoverWindowMs 且距上次衰减也超过该窗口时，按衰减因子
+   * 缩小 gap（下限封底）——每窗口至多衰减一次，天然防抖。
+   * 返回更新后的 gap（未触发衰减时原样返回）。
+   */
+  recordSuccess(now?: number): number;
+  /** 重置到初始 gap（配置变更 apply 重建时用）。 */
+  reset(): void;
+}
+//#endregion
 //#region src/adapter.d.ts
 /** 手动模型可选覆盖（用户设置持久化）。 */
 interface ModelSelection {
@@ -256,6 +433,14 @@ interface SensenovaConnection {
    * 这里只承载用户填的值，**能不能发由模型白名单决定**。
    */
   requestParams?: SensenovaRequestParams;
+  /**
+   * 组粒度调度配置（`llm-sensenova.scheduling`，v0.5 P1）。
+   *
+   * 未配置时组调度**关闭**：gate 以 apiKey 为键、limit=每 key 并发（与 P0 行为一致）；
+   * 配置后按 {@link GroupSchedulingConfig} 归一化（见 `group-pool.ts` 的
+   * `resolvedGroupScheduling`），gate 改以 `group:<index>` 为键、limit=组容量（=账户数）。
+   */
+  scheduling?: GroupSchedulingConfig;
 }
 /** 生成请求三段超时注入（毫秒，测试用）；缺省用模块级常量/并发闸默认。 */
 interface SensenovaTimeouts {
@@ -409,6 +594,14 @@ interface SensenovaAdapterDeps {
    * `registration.replace()` 即刻停止记录。返回 undefined 表示不记录。
    */
   errorLog?: () => SenseNovaErrorLog | undefined;
+  /**
+   * 组池（v0.5 P1）：单位请求组调度器。**刻意做成 thunk** —— 与 `errorLog` 同理，
+   * 组调度是「每请求读」的配置：注入 undefined（未配置 scheduling 或开关关闭时）则
+   * 本 adapter 保持 P0 行为（gate 以 apiKey 为键、无组轮换、无 AIMD 组间隙）。
+   */
+  groupPool?: () => SensenovaGroupPool | undefined;
+  /** AIMD 组间隙控制器（v0.5 P1：任何组撞 429 → ×1.5，8s 无 429 → ×0.95）。 */
+  groupGap?: () => GroupGapController | undefined;
 }
 /** SenseNova（OpenAI 兼容）适配器。 */
 export declare class SensenovaAdapter extends LlmAdapter {
@@ -714,6 +907,21 @@ export interface SensenovaConfig {
    * 详见 `adapter.ts` 的白名单注释（含 Phase 0 实测证据）。
    */
   requestParams?: SensenovaRequestParams;
+  /**
+   * 组粒度调度（v0.5 P1 方向 2：组轮换 + AIMD 组间隙）。
+   *
+   * 「单位请求组」= 每个账户取一把 key 组成的横切面：账户数 A × 每账户 key 数 K
+   * ⇒ 共 K 组，每组 A 把（每账户 1 把），组容量 = A 个并发。调度器以组为轮换单位：
+   * 组内任一账户撞 429 ⇒ 本组整组退避（退避公式见 `group-pool.ts`）+ 该账户全部
+   * key 打账户级联动标记，调度器切到未退避的组；全部组退避 ⇒ 全池冷却快返 429。
+   *
+   * 组间间隙按 AIMD 自适应：撞 429 ×1.5（上限 `groupGapMaxMs`），连续
+   * `recoverWindowMs` 无 429 ×0.95（下限 `groupGapMinMs`）。
+   *
+   * `enabled: false` 时整体退化为 v0.5 P0 的 per-key 池路径（行为不变）。
+   * 账户 label 不符合「账户-序号」约定时（无法划分组）同样自动回落。
+   */
+  scheduling?: GroupSchedulingConfig;
 }
 /**
  * 对外导出的配置 schema。
@@ -807,6 +1015,8 @@ export interface ResolvedSensenovaOptions {
    * `adapter.ts` 的 `MODEL_L2_PARAM_SUPPORT` 白名单在每请求时决定。
    */
   requestParams: SensenovaRequestParams;
+  /** 已归一化的组调度配置（v0.5 P1；enabled=false 时组池不启用）。 */
+  scheduling: GroupSchedulingConfig;
   modelSelection?: ModelSelection;
 }
 /** 把配置的并发上限归一化为正整数（非正整数/无法解析回退 1）。 */

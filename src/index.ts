@@ -38,7 +38,7 @@ import type {
 } from '@deepseek-ai/dsh-llm';
 import { credentialRef, isCredentialRefName } from '@deepseek-ai/dsh-credentials';
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment';
-import { SensenovaAccountPool, type AccountSlot } from './accounts.ts';
+import { SensenovaAccountPool, type AccountSlot, type ResolvedAccount } from './accounts.ts';
 import {
   DEFAULT_RETRY_INITIAL_DELAY_MS,
   DEFAULT_RETRY_JITTER_RATIO,
@@ -59,6 +59,12 @@ import {
   SensenovaKeyPool,
   type KeyPoolParams,
 } from './key-pool.ts';
+import {
+  GroupGapController,
+  SensenovaGroupPool,
+  normalizeGroupScheduling,
+  type GroupSchedulingConfig,
+} from './group-pool.ts';
 import { ERROR_LOG_ROUTE, handleErrorLogHttp } from './error-log-api.ts';
 import { KEYS_STATUS_ROUTE, handleKeysStatusHttp } from './keys-status-api.ts';
 import { KEYS_EXPORT_ROUTE, handleKeysExportHttp } from './keys-api.ts';
@@ -151,6 +157,21 @@ export interface SensenovaConfig {
    * 详见 `adapter.ts` 的白名单注释（含 Phase 0 实测证据）。
    */
   requestParams?: SensenovaRequestParams;
+  /**
+   * 组粒度调度（v0.5 P1 方向 2：组轮换 + AIMD 组间隙）。
+   *
+   * 「单位请求组」= 每个账户取一把 key 组成的横切面：账户数 A × 每账户 key 数 K
+   * ⇒ 共 K 组，每组 A 把（每账户 1 把），组容量 = A 个并发。调度器以组为轮换单位：
+   * 组内任一账户撞 429 ⇒ 本组整组退避（退避公式见 `group-pool.ts`）+ 该账户全部
+   * key 打账户级联动标记，调度器切到未退避的组；全部组退避 ⇒ 全池冷却快返 429。
+   *
+   * 组间间隙按 AIMD 自适应：撞 429 ×1.5（上限 `groupGapMaxMs`），连续
+   * `recoverWindowMs` 无 429 ×0.95（下限 `groupGapMinMs`）。
+   *
+   * `enabled: false` 时整体退化为 v0.5 P0 的 per-key 池路径（行为不变）。
+   * 账户 label 不符合「账户-序号」约定时（无法划分组）同样自动回落。
+   */
+  scheduling?: GroupSchedulingConfig;
 }
 
 /**
@@ -261,6 +282,23 @@ const ConfigSchema = z.object({
     presencePenalty: z.number().min(-2).max(2),
     seed: z.number().min(0).max(9_999_999),
     doSample: z.boolean(),
+  }).volatile(),
+  // 组粒度调度（v0.5 P1 方向 2）。与 `poolPolicy` 同一范式：嵌套对象**整体** `.volatile()`。
+  // 范围依据（group-pool.ts 的 normalize 区间一一对应）：退避底数 ≥1s、指数 1-10、
+  // 上限 ≤600s（宿主重试预算 300s 之上仍有余量）；组间隙 0.1-60s、AIMD 段 1.01-10 / 0.5-0.999。
+  scheduling: z.object({
+    enabled: z.boolean().default(true),
+    cooldownBaseMs: z.natural().min(1_000).max(600_000).default(90_000),
+    cooldownFactor: z.number().min(1).max(10).default(2),
+    cooldownMaxMs: z.natural().min(1_000).max(600_000).default(300_000),
+    cooldownJitter: z.number().min(0).max(1).default(0.5),
+    initialGroupGapMs: z.natural().min(100).max(60_000).default(2_000),
+    groupGapMinMs: z.natural().min(100).max(60_000).default(500),
+    groupGapMaxMs: z.natural().min(100).max(120_000).default(30_000),
+    groupGapMultiplier: z.number().min(1.01).max(10).default(1.5),
+    groupGapRecoverFactor: z.number().min(0.5).max(0.999).default(0.95),
+    recoverWindowMs: z.natural().min(1_000).max(120_000).default(8_000),
+    failFastMs: z.natural().min(100).max(120_000).default(8_000),
   }).volatile(),
 });
 
@@ -392,6 +430,8 @@ export interface ResolvedSensenovaOptions {
    * `adapter.ts` 的 `MODEL_L2_PARAM_SUPPORT` 白名单在每请求时决定。
    */
   requestParams: SensenovaRequestParams;
+  /** 已归一化的组调度配置（v0.5 P1；enabled=false 时组池不启用）。 */
+  scheduling: GroupSchedulingConfig;
   modelSelection?: ModelSelection;
 }
 
@@ -575,6 +615,8 @@ export function resolveAdapterOptions(config: SensenovaConfig): ResolvedSensenov
     errorLog: config.errorLog !== false,
     // key 池策略（2026-09-27）：逐字段钳制，缺省取 DEFAULT_KEY_POOL_PARAMS。
     poolPolicy: normalizePoolPolicy(config.poolPolicy),
+    // 组调度（v0.5 P1）：逐字段回落缺省；enabled 缺省 true。
+    scheduling: normalizeGroupScheduling(config.scheduling),
     // L2 连接级请求参数默认值（2026-09-23）。未配置时为空对象 ⇒ 不注入任何字段。
     requestParams: normalizeRequestParams(config.requestParams),
     ...(modelSelection !== undefined ? { modelSelection } : {}),
@@ -651,6 +693,48 @@ export function apply(ctx: Context, config: SensenovaConfig): void {
   // 每操作读一次（`options()` 自带 memo）⇒ 设置页改完保存即生效，池实例无需重建。
   const keyPoolParams = (): KeyPoolParams => options().poolPolicy;
   const keyPool = new SensenovaKeyPool({ params: keyPoolParams });
+  // ── 组粒度调度（v0.5 P1 方向 2：单位请求组 + AIMD 组间隙）──────────────────────
+  //
+  // 与 key 池**并存**、职责分离：key 池负责 tpm 连续命中的踢出/探测复活（per-key），
+  // 组池负责「组」这一层的退避与轮换（per-group）。adapter 在每次请求时查组池拿
+  // 组索引/组容量（gate 以 `group:<index>` 为键），429 时联动退避。
+  //
+  // 组池的 seed 在 `resolveApiKey` 内（每次都要重新解析全部凭据 ⇒ 手上有全量 key）。
+  const groupScheduling = (): GroupSchedulingConfig => options().scheduling;
+  const groupPool = new SensenovaGroupPool({ config: groupScheduling });
+  const groupGap = new GroupGapController({ config: groupScheduling });
+  /**
+   * 把已解析账户切成「单位请求组」：组索引 = label 的序号（slot），组内按账户号升序。
+   *
+   * label 约定 `账户-序号`（如 `1-0`：账户 1 的第 0 把 key）⇒ 组 i = 每个账户的第 i 把，
+   * 正好是方案里的「每组恰 A 把、每账户 1 把」。任一 label 不可解析即放弃建组
+   * （回落到 per-key 池；自定义命名的账户无法安全分组）。
+   *
+   * @returns 建成的组数（0 = 未启用组调度或缺省回落）。
+   */
+  const seedGroups = (accounts: readonly ResolvedAccount[]): number => {
+    if (!options().scheduling.enabled) return 0;
+    const bySlot = new Map<number, { account: number; key: string }[]>();
+    for (const account of accounts) {
+      const order = accountRotationKey(account.slot.label);
+      if (order === undefined) return 0;
+      const entries = bySlot.get(order.slot) ?? [];
+      entries.push({ account: order.account, key: account.key });
+      bySlot.set(order.slot, entries);
+    }
+    if (bySlot.size === 0) return 0;
+    const groups: string[][] = [];
+    const accountOf = new Map<string, string>();
+    for (const slot of [...bySlot.keys()].sort((a, b) => a - b)) {
+      const entries = (bySlot.get(slot) ?? []).sort((a, b) => a.account - b.account);
+      groups.push(entries.map(entry => entry.key));
+      for (const entry of entries) accountOf.set(entry.key, `account-${entry.account}`);
+    }
+    groupPool.seed(groups, (key) => accountOf.get(key));
+    return groups.length;
+  };
+  /** 当前被 tpm 踢出/探测中的 key（组池选 key 时要排除，避免把阻塞态 key 重新选出来）。 */
+  const blockedKeySet = (): ReadonlySet<string> => new Set(keyPool.snapshot().blocked.map(entry => entry.key));
   /** key → 可读描述（账户名 + credential-ref 名），供限流事件的展示字段反查。 */
   const keyIndex = new Map<string, { label: string; ref: string }>();
 
@@ -681,6 +765,7 @@ export function apply(ctx: Context, config: SensenovaConfig): void {
     const all = await pool.resolvedAccounts();
     for (const account of all) rememberKey(account.key, account.slot);
     const dropped = keyPool.seed(all.map(account => account.key));
+    const groupCount = seedGroups(all);
     // v0.2.7 诊断：配置账户数 / 解析成功数 / 池大小。池只有 1 把而配置有 80 把时
     // （启动时序竞态：配置写入晚于插件 apply），一眼可定位「池未灌满」。
     {
@@ -709,6 +794,24 @@ export function apply(ctx: Context, config: SensenovaConfig): void {
         keyPoolParams().capacity,
       );
     }
+    if (groupCount > 0) {
+      ctx.logger.info(
+        'llm-sensenova: 组粒度调度启用 —— %d 个组（组 i = 每账户第 i 把 key，共 %d 把；组容量 = 组内 key 数）',
+        groupCount,
+        all.length,
+      );
+    }
+    // 组调度启用时以「组轮换」取代 per-key 起始选择：组内按 lastKeyIndex 轮转，
+    // 撞 429 后整组退避并自动切到下一未退避组（`group-pool.ts`）。
+    // `hint.preferredKey` 的会话粘性在组模式下让位于组轮换（组模型的并发窗口是组内 A 把）。
+    // 被 tpm 踢出的 key 显式排除（否则会把阻塞态 key 重新选出来，绕开探测复活）。
+    if (groupCount > 0) {
+      const excluded = blockedKeySet();
+      const picked = groupPool.pickStart(excluded.size > 0 ? excluded : undefined);
+      if (picked !== undefined) return picked;
+      // 组池无可用 ⇒ 交 adapter 入口的 fail-fast（watchKey.allCooled ⇒ 429 + Retry-After）。
+      return fallbackKey;
+    }
     // `hint.preferredKey` 只是**偏好**：池仅在它仍处于运行态时才采纳，否则回落到运行态
     // 的正确一把。这是「会话粘性不会退化成死锁」的关键（2026-09-27）。
     return keyPool.pickStart(hint?.preferredKey) ?? fallbackKey;
@@ -724,8 +827,16 @@ export function apply(ctx: Context, config: SensenovaConfig): void {
     pool.markRejected(rejectedKey, rejection);
     // 401 ⇒ 该 key 永久失效，从池中彻底移除。429 的相位由 keyPool 自己管
     // （`recordTpmStrike` 已达阈值时才会踢），此处不动。
-    if (rejection === 'invalid-credential') keyPool.remove(rejectedKey);
-    const next = keyPool.pickNext(exclude ?? EMPTY_KEY_SET);
+    if (rejection === 'invalid-credential') {
+      keyPool.remove(rejectedKey);
+      groupPool.remove(rejectedKey);
+    }
+    const groupMode = options().scheduling.enabled && groupPool.size > 0;
+    const tried = exclude ?? EMPTY_KEY_SET;
+    // 组模式下把「被 tpm 踢出的 key」一并排除（组池不知道 key 池的阻塞相位）。
+    const next = groupMode
+      ? groupPool.pickNext(new Set([...tried, ...blockedKeySet()]))
+      : keyPool.pickNext(tried);
     if (next === undefined) return undefined;
     // 直接用索引里的可读名做错误文案，**不再重新解析凭据**（省一次 N 槽位的异步解析）。
     const described = keyIndex.get(next);
@@ -745,6 +856,8 @@ export function apply(ctx: Context, config: SensenovaConfig): void {
         retryPolicy: resolved.retryPolicy,
         // L2 连接级请求参数默认值（2026-09-23）：adapter 在每请求时按模型白名单过滤。
         requestParams: resolved.requestParams,
+        // 组粒度调度配置（v0.5 P1）：adapter 用它决定 gate 键/组容量与组间隙。
+        scheduling: resolved.scheduling,
         ...(resolved.modelSelection !== undefined ? { modelSelection: resolved.modelSelection } : {}),
       };
     },
@@ -786,6 +899,10 @@ export function apply(ctx: Context, config: SensenovaConfig): void {
     // W4：限流事件记录器。实例只建一次（构造不碰磁盘，首次 record 才 mkdir/stat），
     // 用 thunk 读取开关 ⇒ 用户在设置页关掉「记录限流事件」即刻生效，无需 replace。
     errorLog: () => (options().errorLog ? errorLog : undefined),
+    // 组粒度调度（v0.5 P1）：adapter 直调组池做退避/联动/组间隙；开关关闭时
+    // 不注入 ⇒ adapter 完全走 P0 的 per-key 路径（行为不变）。
+    groupPool: () => (options().scheduling.enabled ? groupPool : undefined),
+    groupGap: () => (options().scheduling.enabled ? groupGap : undefined),
   });
 
   ctx.llm.registerConfigurableProviders([{

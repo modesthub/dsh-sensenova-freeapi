@@ -42,6 +42,7 @@ import type {
 import { parseRetryAfterMs } from './accounts.ts';
 import { DEFAULT_QUEUE_TIMEOUT_MS, KeyedConcurrencyGate, type Release } from './concurrency.ts';
 import { extractErrorCode, fingerprint, summarize, type SenseNovaErrorLog } from './error-log.ts';
+import { groupGateKey, type GroupGapController, type GroupSchedulingConfig, type SensenovaGroupPool } from './group-pool.ts';
 
 /**
  * SenseNova 目录通常不披露上下文字段，这里用 131072 作为合理默认
@@ -288,6 +289,14 @@ export interface SensenovaConnection {
    * 这里只承载用户填的值，**能不能发由模型白名单决定**。
    */
   requestParams?: SensenovaRequestParams;
+  /**
+   * 组粒度调度配置（`llm-sensenova.scheduling`，v0.5 P1）。
+   *
+   * 未配置时组调度**关闭**：gate 以 apiKey 为键、limit=每 key 并发（与 P0 行为一致）；
+   * 配置后按 {@link GroupSchedulingConfig} 归一化（见 `group-pool.ts` 的
+   * `resolvedGroupScheduling`），gate 改以 `group:<index>` 为键、limit=组容量（=账户数）。
+   */
+  scheduling?: GroupSchedulingConfig;
 }
 
 const EMPTY_MODEL_SELECTION: ModelSelection = { include: [], exclude: [] };
@@ -670,6 +679,14 @@ export interface SensenovaAdapterDeps {
    * `registration.replace()` 即刻停止记录。返回 undefined 表示不记录。
    */
   errorLog?: () => SenseNovaErrorLog | undefined;
+  /**
+   * 组池（v0.5 P1）：单位请求组调度器。**刻意做成 thunk** —— 与 `errorLog` 同理，
+   * 组调度是「每请求读」的配置：注入 undefined（未配置 scheduling 或开关关闭时）则
+   * 本 adapter 保持 P0 行为（gate 以 apiKey 为键、无组轮换、无 AIMD 组间隙）。
+   */
+  groupPool?: () => SensenovaGroupPool | undefined;
+  /** AIMD 组间隙控制器（v0.5 P1：任何组撞 429 → ×1.5，8s 无 429 → ×0.95）。 */
+  groupGap?: () => GroupGapController | undefined;
 }
 
 /** 目录条目：宿主所需的能力元数据快照（listModels 后缓存，resolveModel 消费）。 */
@@ -2052,6 +2069,25 @@ export class SensenovaAdapter extends LlmAdapter {
       connection,
       stickyKey !== undefined ? { preferredKey: stickyKey } : undefined,
     );
+    // v0.5 P1：组粒度调度（单位请求组）。一次 stream() 调用读一次 thunk ——
+    // 配置变更在下次请求生效（与 errorLog 同一约定）。
+    const groupPool = this.deps.groupPool?.();
+    const groupGap = this.deps.groupGap?.();
+    // 🔴 v0.5 P1（acquire_fail_fast 思想）：**全池冷却时 fail-fast** ——
+    // 所有组都在退避 ⇒ 任何 key 现在打出去都必然 429，不值得抢 gate 额度或发出请求。
+    // 直接按 RATE_LIMIT + providerRetryAfterMs=failFastMs 抛回宿主重试层自动退避，
+    // 对齐组退避首档的量级（默认 8s < 90s），避免「撞 429 → 组退避 → 再撞」的循环。
+    if (groupPool !== undefined) {
+      const entryInfo = groupPool.watchKey(apiKey);
+      if (entryInfo !== undefined && entryInfo.allCooled) {
+        const failFastMs = groupPool.config.failFastMs;
+        throw new LlmError(
+          `llm-sensenova: key pool is fully cooled (all ${groupPool.size} groups backing off); refusing request until a group recovers；全池组冷却，拒绝请求，约 ${failFastMs}ms 后再试`,
+          'RATE_LIMIT',
+          { status: 429, providerRetryAfterMs: failFastMs },
+        );
+      }
+    }
     let response: Response | undefined;
     // 当前 attempt 持有的并发额度；成功进入流式阶段后保持到 finally 释放。
     let release: Release | undefined;
@@ -2098,12 +2134,21 @@ export class SensenovaAdapter extends LlmAdapter {
         const attemptPhase = rotations > 0 ? 'rotate' : internalRetries > 0 ? 'retry' : 'request';
         // v0.5 P0：单次上游往返耗时（毫秒，建连→响应头）。
         const attemptStart = Date.now();
+        // v0.5 P1：组粒度并发闸（**每轮 attempt 重算** —— apiKey 随轮换变化，
+        // 组归属随之变化）。有组 ⇒ gate 键升级为「组键」，同组请求共享一份
+        // 「组容量（=组内 key 数=账户数）」额度，超出进组队列；无组（scheduling
+        // 未配置）⇒ 回落 P0 行为：gate 键=apiKey、limit=每 key 并发。
+        const groupInfo = groupPool !== undefined ? groupPool.watchKey(apiKey) : undefined;
+        const gateKey = groupInfo !== undefined ? groupGateKey(groupInfo.groupIndex) : apiKey;
+        // 组容量 = 组内 key 数（每账户一把 ⇒ 账户数 A）；与旧「每 key 并发」取较大者，
+  // 保证单账户 + concurrency>1 的既有配置不被组模型强行串行（行为向后兼容）。
+  const gateLimit = groupInfo !== undefined ? Math.max(groupInfo.capacity, limit) : limit;
         // 按本次 attempt 实际使用的 key 获取并发额度；排队期间中止会在此 reject
         // （不占额度），排队超时以 TimeoutError reject（同样不占额度），统一映射
         // 可重试 TIMEOUT 交宿主重试层（design D4）。await 抛出时 release 保持
         // undefined，finally 不误放他人额度。
         try {
-          release = await this.gate.acquire(apiKey, limit, options.signal, queueMs);
+          release = await this.gate.acquire(gateKey, gateLimit, options.signal, queueMs);
         } catch (error) {
           if (!isTimeoutReason(error)) throw error;
           throw new LlmError(
@@ -2166,6 +2211,10 @@ export class SensenovaAdapter extends LlmAdapter {
           // 池侧同样以成功为「已恢复」的最强证据：清零该 key 的连续命中计数；
           // 若它正处于阻塞态（被本轮借用后打成功）⇒ 立即挂回运行态末尾。
           this.deps.reportSuccess?.(apiKey);
+          // v0.5 P1：组侧同样以成功为恢复证据 —— 清本组退避/命中计数 + 该账户在
+          // 其他组的联动冷却标记；AIMD 控制器据此衰减组间隙（8s 窗口内至多一次）。
+          groupPool?.onSuccess(apiKey);
+          groupGap?.recordSuccess();
           probeResetBySuccess = true;
           // v0.5 P0：请求成功也记一条运行日志（phase=attemptPhase, result=ok,
           // latencyMs=attempt 往返耗时）。「全记」是测试阶段的采样口径（E=全记），
@@ -2183,6 +2232,7 @@ export class SensenovaAdapter extends LlmAdapter {
             latencyMs: Date.now() - attemptStart,
             rotated: rotations > 0,
             attempt: attemptIndex,
+            ...(groupInfo !== undefined ? { groupIndex: groupInfo.groupIndex } : {}),
             account: fingerprint(apiKey),
             ...(() => {
               const described = this.deps.describeKey?.(apiKey);
@@ -2259,10 +2309,27 @@ export class SensenovaAdapter extends LlmAdapter {
         } else {
           poolStateThisAttempt = this.deps.reportRateLimit?.(apiKey, 'rate');
         }
+        // v0.5 P1：组粒度联动退避 —— 任何 429（不分 kind）都让「本组整组退避 +
+        // 同账户在其他组的 key 打账户级标记」。上层 keyPool 的 tpm 踢出判定继续
+        // 并行工作（两者职责不同：keyPool 管「这把 key 连续命中」，组池管「这一轮
+        // 的账户×key 组合整体退避」）。
+        if (attempt.status === 429) {
+          groupPool?.reportRateLimit({
+            key: apiKey,
+            kind: classified.kind === 'quota_exhausted' ? 'quota_exhausted' : (classified.kind ?? 'rate'),
+          });
+          // v0.5 P1：AIMD 组间隙 —— 任何 429 都把「下一次组切换的间隔」乘性放大
+          // （×1.5，封顶 30s）；连续 8s 无 429 后由成功分支 recordSuccess 加性衰减
+          // （×0.95，下限 0.5s）。乘性放大比加性快，符合「限流超线性恶化」的事实。
+          groupGap?.recordHit();
+        }
         // W4：把这次限流落成一条结构化事件（异步、不阻塞、绝不抛）。
         // 两个出口各自补齐差异字段：轮换（不抛出，需在换 key 前记录被拒的 key）
         // 与抛出（此时才知道最终 providerRetryAfterMs）。
+        // v0.5 P1：事件与成功日志一样带 groupIndex / groupGapMs（后者的取当前目标
+        // gap——轮换 branch 在记录后才 recordHit，故字段反映的是「本次命中前」的 gap）。
         const eventFloorMs = dynamicFloorMs ?? classified.retryFloorMs;
+        const currentGapMs = groupGap?.gapMs();
         const emitRateLimitEvent = (outcome: {
           rotated: boolean;
           providerRetryAfterMs?: number;
@@ -2302,6 +2369,9 @@ export class SensenovaAdapter extends LlmAdapter {
             rotated: outcome.rotated,
             quotaRotation,
             attempt: attemptIndex,
+            // v0.5 P1：组维度诊断字段（无组调度时不出现在日志里）。
+            ...(groupInfo !== undefined ? { groupIndex: groupInfo.groupIndex } : {}),
+            ...(currentGapMs !== undefined ? { groupGapMs: currentGapMs } : {}),
             account: fingerprint(apiKey),
             // 🔴 2026-09-27 新增两个**可读**字段（设置页「错误记录」新增两列）：
             //   accountLabel  账户可读名（如「账户 2」）
@@ -2361,6 +2431,18 @@ export class SensenovaAdapter extends LlmAdapter {
             release = undefined;
             apiKey = next;
             rotations += 1;
+            // v0.5 P1：组间间隙（AIMD）。只在**真的换到了另一组**时等待 ——
+            // 同组内换 key 不触发组间隙（同一单位请求组内的轮换无需降速，
+            // 否则一次 429 就要多睡 gap × 组内 key 数，违背「组容量=A 并发」的
+            // 吞吐意图）。gap 值已在本次 429 上报时被 recordHit ×1.5 放大过。
+            if (attempt.status === 429 && groupGap !== undefined) {
+              const nextGroup = groupPool?.watchKey(next)?.groupIndex;
+              const prevGroup = groupPool?.watchKey(rejectedKey)?.groupIndex;
+              if (nextGroup !== undefined && prevGroup !== undefined && nextGroup !== prevGroup) {
+                const gapMs = groupGap.gapMs();
+                if (gapMs > 0) await abortableSleep(gapMs, options.signal);
+              }
+            }
             if (quotaRotate) {
               this.quotaStickyKeys.set(options.sessionId, next); // 粘住新 key
               // 2026-09-16 实测修订：此处原为 `this.tpmHitCounts.delete(sessionId)`
