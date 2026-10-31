@@ -345,11 +345,21 @@ export interface ErrorLogEntryView {
   ts: string;
   model: string;
   code: string;
-  /** `'rate'`（code 8）/ `'rpm'`（请求数限流）/ `'tpm'`（token 限流）/ `''`。 */
+  /** `'rate'`（code 8）/ `'rpm'`（请求数限流）/ `'tpm'`（token 限流）/ `'quota_exhausted'`（真配额耗尽）/ `''`。 */
   kind: string;
   rotated: boolean;
   attempt: number;
   message: string;
+  /** 事件阶段（v0.5 新增）：`request|retry|rotate|stream|probe`。 */
+  phase?: string;
+  /** 结果（v0.5 新增）：`ok|error|interrupted`。 */
+  result?: string;
+  /** 单次上游往返耗时（毫秒，v0.5 新增）。 */
+  latencyMs?: number;
+  /** 命中的「单位请求组」索引（v0.5 P1 组粒度新增；落地前恒缺省）。 */
+  groupIndex?: number;
+  /** 本次实际应用的组间延时（毫秒，v0.5 P1 AIMD 组间隙新增）。 */
+  groupGapMs?: number;
   retryFloorMs?: number;
   providerRetryAfterMs?: number;
   /** 探测档位索引（0 起）；仅 rpm/tpm 有。长期停在最大值 = 档位锁死。 */
@@ -385,6 +395,16 @@ export interface ErrorLogState {
   truncated: boolean;
   /** 展开的行下标（一次只展开一条）；null = 全部收起。 */
   expandedRow: number | null;
+  /**
+   * 展示模式（v0.5 P0 新增）：`'limits'`（默认，只显示限流/异常行，聚焦诊断）/
+   * `'all'`（显示全部运行日志，含成功行）。
+   */
+  mode: 'limits' | 'all';
+  /**
+   * 数据来源（v0.5 P0 新增）：`'runtime'`（默认，新运行日志 `sensenova-runtime.jsonl`）/
+   * `'errors'`（兼容读取旧「仅限流事件」文件 `sensenova-errors.jsonl`）。
+   */
+  source: 'runtime' | 'errors';
 }
 
 export const IDLE_ERROR_LOG_STATE: ErrorLogState = {
@@ -398,6 +418,8 @@ export const IDLE_ERROR_LOG_STATE: ErrorLogState = {
   entries: [],
   truncated: false,
   expandedRow: null,
+  mode: 'limits',
+  source: 'runtime',
 };
 
 function textOf(value: unknown): string {
@@ -414,10 +436,14 @@ function numberOf(value: unknown): number {
  * 与 host 侧同一原则：**坏数据只降级、绝不抛** —— 这块是辅助信息，不能让设置页崩。
  * 服务端已经做过一次字段裁剪，这里再兜一次是为了防止"host 升级了、client 还是旧包"
  * 这种版本错配（插件以 `link:` 挂载，两侧产物可能不同步）。
+ *
+ * `mode`/`source` 是纯 UI 偏好，服务端不回传；由 `override` 显式指定
+ * （调用方 = controller 当前值），否则回落默认。
  */
 export function normalizeErrorLogState(
   raw: unknown,
   expandedRow: number | null = null,
+  override: { mode?: ErrorLogState['mode']; source?: ErrorLogState['source'] } = {},
 ): ErrorLogState {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return { ...IDLE_ERROR_LOG_STATE, status: 'error', expandedRow };
@@ -440,6 +466,12 @@ export function normalizeErrorLogState(
       ...(typeof entry.providerRetryAfterMs === 'number'
         ? { providerRetryAfterMs: entry.providerRetryAfterMs }
         : {}),
+      // v0.5 P0：运行日志新字段透传（phase/result/latencyMs/groupIndex/groupGapMs）。
+      ...(typeof entry.phase === 'string' && entry.phase !== '' ? { phase: entry.phase } : {}),
+      ...(typeof entry.result === 'string' && entry.result !== '' ? { result: entry.result } : {}),
+      ...(typeof entry.latencyMs === 'number' ? { latencyMs: entry.latencyMs } : {}),
+      ...(typeof entry.groupIndex === 'number' ? { groupIndex: entry.groupIndex } : {}),
+      ...(typeof entry.groupGapMs === 'number' ? { groupGapMs: entry.groupGapMs } : {}),
       ...(typeof entry.probeHits === 'number' ? { probeHits: entry.probeHits } : {}),
       ...(typeof entry.kicked === 'boolean' ? { kicked: entry.kicked } : {}),
       ...(typeof entry.poolRunning === 'number' ? { poolRunning: entry.poolRunning } : {}),
@@ -465,6 +497,9 @@ export function normalizeErrorLogState(
     truncated: record.truncated === true,
     // 刷新后条数可能变少 ⇒ 越界的展开下标要收回，否则会"卡"在已不存在的行上。
     expandedRow: expandedRow !== null && expandedRow < entries.length ? expandedRow : null,
+    // v0.5 P0：模式/来源是纯 UI 偏好，服务端不回传 —— 用覆盖值（不存在回默认）。
+    mode: override.mode ?? 'limits',
+    source: override.source ?? 'runtime',
   };
 }
 
@@ -1281,16 +1316,21 @@ export class SenseNovaSettingsController {
    * 自带 cookie 鉴权，所以这里无需处理凭据。**不自动调用**（保持 idle，避免打开
    * 设置页就产生 I/O），由用户点「刷新」触发。
    */
-  async refreshErrorLog(): Promise<void> {
+  async refreshErrorLog(source: ErrorLogState['source'] = this.diagnostics.source): Promise<void> {
     if (this.diagnostics.status === 'loading') return;
-    this.diagnostics = { ...this.diagnostics, status: 'loading' };
+    this.diagnostics = { ...this.diagnostics, status: 'loading', source };
     this.publish();
     try {
-      const response = await fetch(`${ERROR_LOG_ROUTE}?limit=${ERROR_LOG_PREVIEW_LIMIT}`, {
-        credentials: 'same-origin',
-      });
+      const response = await fetch(
+        `${ERROR_LOG_ROUTE}?limit=${ERROR_LOG_PREVIEW_LIMIT}&source=${source}`,
+        { credentials: 'same-origin' },
+      );
       if (!response.ok) throw new Error(`llm-sensenova: error log HTTP ${response.status}`);
-      this.diagnostics = normalizeErrorLogState(await response.json(), this.diagnostics.expandedRow);
+      this.diagnostics = normalizeErrorLogState(
+        await response.json(),
+        this.diagnostics.expandedRow,
+        { mode: this.diagnostics.mode, source },
+      );
     } catch {
       // 路由缺失（旧 host / 非 web profile）或网络异常 ⇒ 降级为 error 态，由 UI 显示
       // 「暂不可用」。绝不抛：这块是辅助信息，不能影响设置页其余部分。
@@ -1306,6 +1346,17 @@ export class SenseNovaSettingsController {
       ...this.diagnostics,
       expandedRow: this.diagnostics.expandedRow === index ? null : index,
     };
+    this.publish();
+  }
+
+  /**
+   * 切换运行日志的展示模式（v0.5 P0 新增）：`'limits'` = 只显示限流/异常行（默认，
+   * 聚焦诊断）；`'all'` = 显示全部（含成功行）。**纯 UI 偏好**：只改本态、不刷新、
+   * 不落盘、不参与 dirty —— 刷新时由 `refreshErrorLog` 透传维持。
+   */
+  setErrorLogMode(mode: ErrorLogState['mode']): void {
+    if (mode !== 'limits' && mode !== 'all') return;
+    this.diagnostics = { ...this.diagnostics, mode };
     this.publish();
   }
 

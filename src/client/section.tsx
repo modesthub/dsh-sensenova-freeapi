@@ -66,6 +66,8 @@ export interface SenseNovaSectionProps {
   refreshErrorLog: () => void;
   /** 错误记录诊断区块：展开/收起某一行。 */
   toggleErrorLogRow: (index: number) => void;
+  /** 运行日志展示模式切换（v0.5 P0）：`'limits'` = 只显示限流/异常，`'all'` = 全部。 */
+  setErrorLogMode: (mode: 'limits' | 'all') => void;
   /** 「当前模型 + 全部参数」面板：拉取快照（只读，2026-09-23 Phase 5）。 */
   refreshModelInfo: () => void;
   /** Key 导入 / 导出：编辑文本框内容（v0.2.1）。 */
@@ -647,16 +649,22 @@ function ErrorLogPanel(props: {
   state: ErrorLogState;
   onRefresh: () => void;
   onToggleRow: (index: number) => void;
+  onSetMode: (mode: 'limits' | 'all') => void;
 }): JSX.Element {
   const log = props.state;
   const busy = log.status === 'loading';
+  // v0.5 P0：「限流」模式 = 只显示限流/异常行（result !== 'ok'，含旧日志无 result 的行）。
+  // 过滤是纯显示层动作，不动 state.entries —— 展开下标仍按原始索引对齐。
+  const visible = log.mode === 'limits'
+    ? log.entries.filter((entry) => entry.result !== 'ok')
+    : log.entries;
 
   let body: JSX.Element;
   if (log.status === 'idle') {
     body = <p className="sn-hint">{props.t('diagnosticsIdle')}</p>;
   } else if (log.status === 'error') {
     body = <p className="sn-hint sn-diagnosticsWarn">{props.t('diagnosticsUnavailable')}</p>;
-  } else if (!log.available || log.entries.length === 0) {
+  } else if (!log.available || visible.length === 0) {
     body = <p className="sn-hint">{props.t('diagnosticsEmpty')}</p>;
   } else {
     body = (
@@ -680,56 +688,78 @@ function ErrorLogPanel(props: {
           <div className="sn-diagnosticsRow">
             <span>{props.t('diagnosticsColumnTime')}</span>
             <span>{props.t('diagnosticsColumnType')}</span>
+            {/* v0.5 P0：新增「组」列（单位请求组索引，组粒度落地前恒为 —） */}
+            <span>{props.t('diagnosticsColumnGroup')}</span>
             <span className="sn-truncate">{props.t('diagnosticsColumnModel')}</span>
+            {/* v0.5 P0：新增「耗时」列（单次上游往返毫秒）。 */}
+            <span>{props.t('diagnosticsColumnLatency')}</span>
             {/* 🔴 2026-09-27 新增两列：可读账户名 + credential-ref 名 */}
             <span className="sn-truncate">{props.t('diagnosticsColumnAccount')}</span>
             <span className="sn-truncate">{props.t('diagnosticsColumnApi')}</span>
           </div>
-          {log.entries.map((entry, index) => (
-            <div key={`${entry.ts}-${index}`}>
-              <button
-                type="button"
-                className="sn-diagnosticsRow sn-diagnosticsRowButton"
-                aria-expanded={log.expandedRow === index}
-                onClick={() => props.onToggleRow(index)}
-              >
-                <span className="sn-mono">{formatClock(entry.ts)}</span>
-                <span className="sn-diagnosticsCode" data-kind={entry.kind}>
-                  {entry.code !== '' ? entry.code : '—'}
-                </span>
-                <span className="sn-mono sn-truncate" title={entry.model}>
-                  {entry.model !== '' ? entry.model : '—'}
-                </span>
-                {/*
-                  🔴 2026-09-27 新增两列。旧日志（本字段加入之前写下的行）没有它们
-                  ⇒ 显示 '—'，属无害降级。
-                  `accountLabel` 缺失时回落到指纹 `account`，这样至少还能区分是哪把 key。
-                */}
-                <span
-                  className="sn-truncate"
-                  title={entry.accountLabel !== undefined && entry.accountLabel !== ''
-                    ? entry.accountLabel
-                    : entry.account}
+          {visible.map((entry) => {
+            const rawIndex = log.entries.indexOf(entry);
+            return (
+              <div key={`${entry.ts}-${rawIndex}`}>
+                <button
+                  type="button"
+                  className="sn-diagnosticsRow sn-diagnosticsRowButton"
+                  data-result={entry.result ?? ''}
+                  aria-expanded={log.expandedRow === rawIndex}
+                  onClick={() => props.onToggleRow(rawIndex)}
                 >
-                  {entry.accountLabel !== undefined && entry.accountLabel !== ''
-                    ? entry.accountLabel
-                    : '—'}
-                </span>
-                <span className="sn-mono sn-truncate" title={entry.accountRef}>
-                  {entry.accountRef !== undefined && entry.accountRef !== '' ? entry.accountRef : '—'}
-                </span>
-              </button>
-              {log.expandedRow === index ? (
-                <div className="sn-diagnosticsDetail">
-                  <div className="sn-diagnosticsTags">
-                    <span>{props.t('diagnosticsAttempt', { n: entry.attempt })}</span>
-                    <span>
-                      {entry.rotated
-                        ? props.t('diagnosticsRotatedYes')
-                        : props.t('diagnosticsRotatedNo')}
-                    </span>
-                    {entry.retryFloorMs !== undefined ? (
+                  <span className="sn-mono">{formatClock(entry.ts)}</span>
+                  <span className="sn-diagnosticsCode" data-kind={entry.kind}>
+                    {entry.code !== '' ? entry.code : '—'}
+                  </span>
+                  <span className="sn-mono" title={entry.groupIndex !== undefined ? `group ${entry.groupIndex}` : undefined}>
+                    {entry.groupIndex !== undefined ? entry.groupIndex : '—'}
+                  </span>
+                  <span className="sn-mono sn-truncate" title={entry.model}>
+                    {entry.model !== '' ? entry.model : '—'}
+                  </span>
+                  <span className="sn-mono" title={entry.latencyMs !== undefined ? `${entry.latencyMs}ms` : undefined}>
+                    {entry.latencyMs !== undefined ? `${entry.latencyMs}ms` : '—'}
+                  </span>
+                  {/*
+                    🔴 2026-09-27 新增两列。旧日志（本字段加入之前写下的行）没有它们
+                    ⇒ 显示 '—'，属无害降级。
+                    `accountLabel` 缺失时回落到指纹 `account`，这样至少还能区分是哪把 key。
+                  */}
+                  <span
+                    className="sn-truncate"
+                    title={entry.accountLabel !== undefined && entry.accountLabel !== ''
+                      ? entry.accountLabel
+                      : entry.account}
+                  >
+                    {entry.accountLabel !== undefined && entry.accountLabel !== ''
+                      ? entry.accountLabel
+                      : '—'}
+                  </span>
+                  <span className="sn-mono sn-truncate" title={entry.accountRef}>
+                    {entry.accountRef !== undefined && entry.accountRef !== '' ? entry.accountRef : '—'}
+                  </span>
+                </button>
+                {log.expandedRow === rawIndex ? (
+                  <div className="sn-diagnosticsDetail">
+                    <div className="sn-diagnosticsTags">
+                      <span>{props.t('diagnosticsAttempt', { n: entry.attempt })}</span>
+                      {entry.phase !== undefined && entry.phase !== '' ? (
+                        <span>{props.t('diagnosticsPhase', { phase: entry.phase })}</span>
+                      ) : null}
+                      {entry.result !== undefined && entry.result !== '' ? (
+                        <span>{props.t('diagnosticsResult', { result: entry.result })}</span>
+                      ) : null}
+                      <span>
+                        {entry.rotated
+                          ? props.t('diagnosticsRotatedYes')
+                          : props.t('diagnosticsRotatedNo')}
+                      </span>
+                      {entry.retryFloorMs !== undefined ? (
                       <span>{props.t('diagnosticsFloor', { ms: entry.retryFloorMs })}</span>
+                    ) : null}
+                    {entry.groupGapMs !== undefined ? (
+                      <span>{props.t('diagnosticsGroupGap', { ms: entry.groupGapMs })}</span>
                     ) : null}
                     {entry.providerRetryAfterMs !== undefined ? (
                       <span>{props.t('diagnosticsPra', { ms: entry.providerRetryAfterMs })}</span>
@@ -770,7 +800,8 @@ function ErrorLogPanel(props: {
                 </div>
               ) : null}
             </div>
-          ))}
+          );
+          })}
         </div>
 
         <p className="sn-hint sn-truncate" title={log.path}>
@@ -785,6 +816,25 @@ function ErrorLogPanel(props: {
     <div className="sn-card sn-diagnostics">
       <div className="sn-fieldHead">
         <span className="sn-label">{props.t('diagnosticsTitle')}</span>
+        {/* v0.5 P0：展示模式切换（限流/全部）。纯 UI 偏好，不刷新、不落盘。 */}
+        <div className="sn-segmented" role="group" aria-label={props.t('diagnosticsModeLabel')}>
+          <button
+            type="button"
+            className={log.mode === 'limits' ? 'sn-segmentedActive' : ''}
+            disabled={busy}
+            onClick={() => props.onSetMode('limits')}
+          >
+            {props.t('diagnosticsModeLimits')}
+          </button>
+          <button
+            type="button"
+            className={log.mode === 'all' ? 'sn-segmentedActive' : ''}
+            disabled={busy}
+            onClick={() => props.onSetMode('all')}
+          >
+            {props.t('diagnosticsModeAll')}
+          </button>
+        </div>
         <button
           type="button"
           className="sn-linkButton"
@@ -1086,28 +1136,13 @@ export function SenseNovaSection(props: SenseNovaSectionProps): JSX.Element {
           {t('refresh')}
         </button>
       </div>
-      <p className="sn-intro">{t('intro')}</p>
       {!state.writable ? (
         <p className="sn-readOnly" role="status">
           {t('readOnly')}
         </p>
       ) : null}
 
-      {/* 分组 1：接入信息 */}
-      <SectionHeading text={t('groupConnection')} />
-      <div className="sn-card sn-cardCompact">
-        <div className="sn-field">
-          <div className="sn-fieldHead">
-            <span className="sn-label">{t('routeLabel')}</span>
-            <span className="sn-badges">
-              <span className="sn-badge">{state.route}</span>
-            </span>
-          </div>
-          <p className="sn-hint">{state.displayName}</p>
-        </div>
-      </div>
-
-      {/* 分组 2：凭据与账户 */}
+      {/* 凭据与账户 */}
       <SectionHeading text={t('groupCredentials')} />
 
       {/* Key 池状态（v0.2.7）：当前 key / 下一把 / 池把数 */}
@@ -1277,6 +1312,7 @@ export function SenseNovaSection(props: SenseNovaSectionProps): JSX.Element {
         state={state.diagnostics}
         onRefresh={props.refreshErrorLog}
         onToggleRow={props.toggleErrorLogRow}
+        onSetMode={props.setErrorLogMode}
       />
 
       {/* 分组 4b：当前模型 + 全部参数 —— 只读（2026-09-23 Phase 5）。回答"我现在用的

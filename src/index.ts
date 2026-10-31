@@ -116,10 +116,11 @@ export interface SensenovaConfig {
    */
   retryPolicy?: RetryPolicyConfig;
   /**
-   * 限流事件记录器开关（2026-09-17 W4 新增，默认开）。
+   * 运行日志记录器开关（2026-09-17 W4 新增，默认开；v0.5 P0 起从「仅限流事件」升级为
+   * 「每次请求的运行日志」，成功也记）。
    *
-   * 开启时把每一次 429 落成一行 JSONL（`$DSH_HOME/logs/sensenova-errors.jsonl`）：
-   * `error.code` / 模型 / 账号指纹 / 退避档位 / 是否轮换 / 时间。异步写入、不阻塞
+   * 开启时把每一次请求的结果落成一行 JSONL（`$DSH_HOME/logs/sensenova-runtime.jsonl`）：
+   * `error.code` / 模型 / 账号指纹 / 退避档位 / 是否轮换 / 耗时 / 时间。异步写入、不阻塞
    * 请求、写失败静默，**绝不落 key 原文**（只写 sha256 前 8 位指纹）。
    * 属于「每请求读」的配置：关掉即刻停止记录，无需重建/重启。
    */
@@ -227,8 +228,9 @@ const ConfigSchema = z.object({
   // ⚠️ 用本地的 `RetryPolicyFieldsSchema` 而非官方 `RetryPolicySchema`——
   // 理由见该 schema 上方的注释（官方 backoff 缺省 10_000 会重新引入悬崖）。
   retryPolicy: RetryPolicyFieldsSchema.volatile(),
-  // 限流事件记录器（2026-09-17 W4）：默认开。路径固定为
-  // `$DSH_HOME/logs/sensenova-errors.jsonl`（见 error-log.ts）。
+  // 运行日志记录器（2026-09-17 W4）：默认开。路径固定为
+  // `$DSH_HOME/logs/sensenova-runtime.jsonl`（见 error-log.ts；旧名
+  // sensenova-errors.jsonl 保留兼容读取，见 LEGACY_ERROR_LOG_SEGMENTS）。
   errorLog: z.boolean().default(true).volatile(),
   // key 池策略（2026-09-27 新增）。与 `retryPolicy` 同一范式：嵌套对象**整体** `.volatile()`。
   // 范围依据：探测间隔下限 5s 防高频打网关；上限与 TPM 顶档量级一致；容量上限 10 是

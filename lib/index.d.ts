@@ -132,6 +132,29 @@ interface SenseNovaRateLimitEvent {
    * 的约定（见 `tests/error-log.test.ts` 的脱敏断言）依然成立。
    */
   accountRef?: string;
+  /**
+   * 事件阶段（v0.5 新增）：`request`（首次请求）/ `retry`（插件内原地等待后重试）/
+   * `rotate`（换 key 后重试）/ `stream`（流式接收）/ `probe`（探针）。限流事件里
+   * 该字段标 `request|retry|rotate` 之一；成功事件的 `stream` 表示流收完。
+   */
+  phase?: string;
+  /**
+   * 结果（v0.5 新增）：`ok`（成功）/ `error`（失败）/ `interrupted`（被中止）。
+   * 旧限流事件省略该字段（隐含 error）。
+   */
+  result?: string;
+  /** 单次上游往返耗时（毫秒，v0.5 新增）。 */
+  latencyMs?: number;
+  /** 命中的「单位请求组」索引（0 起，v0.5 P1 组粒度新增；落地前恒缺省）。 */
+  groupIndex?: number;
+  /** 本次实际应用的组间延时（毫秒，v0.5 P1 AIMD 组间隙新增）。 */
+  groupGapMs?: number;
+  /**
+   * 测试期诊断字段：错误体原文尾部（≤500 字符），供观察商汤真实返回结构；
+   * P3 收敛时删除。**绝不含 key 原文**（错误体不落密钥的假设由 upstream 保证，若
+   * 违反会在这里暴露——这正是它存在的意义）。
+   */
+  _rawBodyTail?: string;
 }
 /**
  * 限流事件记录器。
@@ -199,7 +222,7 @@ interface SensenovaConnection {
    *
    * 默认开启（maxRetries **1**，2026-10-26 下调：3 次×20s=60s 的等待比宿主退避还长）；
    * `waitMs` 按模型取 {@link MODEL_CONNECT_RETRY_WAIT_MS}
-   * （deepseek-flash 15s / deepseek-v4-flash 10s / 其他 10s），设置里显式配 `waitMs`
+   * （2026-10-31 统一下调到 5s），设置里显式配 `waitMs`
    * 或 `modelWaitMs` 可覆盖；`maxRetries: 0` 关闭（行为与原版一致）。
    *
    * 2026-10-25 实测依据：
@@ -656,10 +679,11 @@ export interface SensenovaConfig {
    */
   retryPolicy?: RetryPolicyConfig;
   /**
-   * 限流事件记录器开关（2026-09-17 W4 新增，默认开）。
+   * 运行日志记录器开关（2026-09-17 W4 新增，默认开；v0.5 P0 起从「仅限流事件」升级为
+   * 「每次请求的运行日志」，成功也记）。
    *
-   * 开启时把每一次 429 落成一行 JSONL（`$DSH_HOME/logs/sensenova-errors.jsonl`）：
-   * `error.code` / 模型 / 账号指纹 / 退避档位 / 是否轮换 / 时间。异步写入、不阻塞
+   * 开启时把每一次请求的结果落成一行 JSONL（`$DSH_HOME/logs/sensenova-runtime.jsonl`）：
+   * `error.code` / 模型 / 账号指纹 / 退避档位 / 是否轮换 / 耗时 / 时间。异步写入、不阻塞
    * 请求、写失败静默，**绝不落 key 原文**（只写 sha256 前 8 位指纹）。
    * 属于「每请求读」的配置：关掉即刻停止记录，无需重建/重启。
    */

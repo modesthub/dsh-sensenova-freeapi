@@ -7,13 +7,15 @@
  *      `connection.api.credentials`（与 @mars-sea/dsh-commandcode-provider 同构）；
  *   3. 用 `configForms.get('llm-sensenova')` 生成设置域，
  *      交给 SenseNovaSettingsController（领域层，无 JSX）；
- *   4. 注入 `settings.section`（设置页）与 `settings.models.provider-card`
- *      （Models 页卡片）两个槽。
+ *   4. 注入 `settings.section`（设置页）、`settings.models.provider-card`
+ *      （Models 页卡片）两个槽；v0.3.0 起另注入侧边栏大面板：
+ *      `sidebar.panellist`（侧边栏入口）+ `main`（中央大面板，key=sensenova）。
  *
  * API key 一律经凭据域写入（credential-ref），页面不回显明文；host 是唯一事实
  * 来源，保存后立即热生效。
  */
 import { SenseNovaSection } from './section';
+import { SenseNovaPanel, SenseNovaPanelIcon } from './panel';
 import { SenseNovaProviderCard } from './card';
 import {
   SENSENOVA_NS,
@@ -199,6 +201,13 @@ function injectPageCss(): void {
     /* 错误记录诊断区块（只读运行数据，2026-09-18） */
     '.sn-linkButton{font-size:12px;color:var(--dsw-alias-brand-primary,#3b82f6);background:none;border:none;padding:2px 4px;cursor:pointer;border-radius:4px;font-family:inherit}',
     '.sn-linkButton:disabled{color:var(--dsw-alias-label-tertiary,#8a8a8a);cursor:default}',
+    // v0.5 P0：运行日志「限流/全部」分段切换（纯 UI，不刷新不落盘）。
+    // .sn-segmented 与 .sn-fieldHead 同排时 margin-left:auto 靠右；行内 gap 已由 .sn-fieldHead 提供。
+    '.sn-segmented{margin-left:auto;display:inline-flex;align-items:center;gap:2px;padding:2px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.22));border-radius:8px;background:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.06));font-size:12px}',
+    '.sn-segmented button{border:none;background:none;color:var(--dsw-alias-label-tertiary,#8a8a8a);padding:2px 10px;border-radius:6px;cursor:pointer;font:inherit;line-height:1.6}',
+    '.sn-segmented button:hover:not(:disabled){color:var(--dsw-alias-label-primary,#222)}',
+    '.sn-segmented button:disabled{opacity:.55;cursor:default}',
+    '.sn-segmented .sn-segmentedActive{background:var(--dsw-alias-bg-elevated,#fff);color:var(--dsw-alias-label-primary,#222);box-shadow:0 1px 2px rgba(0,0,0,.12);font-weight:600}',
     '.sn-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}',
     '.sn-truncate{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}',
     '.sn-diagnosticsBody{display:flex;flex-direction:column;gap:10px;min-width:0}',
@@ -208,10 +217,14 @@ function injectPageCss(): void {
     '.sn-diagnosticsList{display:flex;flex-direction:column;min-width:0;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.22));border-radius:8px;overflow:hidden}',
     // 🔴 2026-09-27：三列 → 五列（时间 / 类型 / 模型 / 账户 / API）。账户名与 ref 名
     // 都可能较长 ⇒ 这两个单元格配 `.sn-truncate` 做省略号，避免把窄面板撑破。
-    '.sn-diagnosticsRow{display:grid;grid-template-columns:58px 1fr 1fr 72px 1.1fr;gap:10px;align-items:center;padding:6px 10px;font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8a8a);min-width:0}',
+    // 🔴 v0.5 P0：五列 → 七列（时间 / 类型 / 组 / 模型 / 耗时 / 账户 / API）。
+    '.sn-diagnosticsRow{display:grid;grid-template-columns:58px 1fr 34px 1fr 52px 72px 1.1fr;gap:10px;align-items:center;padding:6px 10px;font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8a8a);min-width:0}',
     '.sn-diagnosticsList>div+div>.sn-diagnosticsRowButton{border-top:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.16))}',
     '.sn-diagnosticsRowButton{width:100%;border:none;background:none;text-align:left;cursor:pointer;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary,#222)}',
     '.sn-diagnosticsRowButton:hover{background:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.07))}',
+    // v0.5 P0：成功行（result=ok）用绿色标签色弱化，与限流行（橙/黄）形成对比 ——
+    // 「限流/全部」模式里都靠它一眼区分成功与异常。
+    '.sn-diagnosticsRowButton[data-result="ok"]{color:var(--dsw-alias-label-success,#2f7d4f)}',
     '.sn-diagnosticsCode{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.sn-diagnosticsCode[data-kind="rate"]{color:var(--dsw-alias-label-warning,#b58900)}',
     // 请求数限流（rpm）与 rate 同色：两者都是「秒级窗口」，与 tpm（分钟级）在语义上区分开。
@@ -229,6 +242,13 @@ function injectPageCss(): void {
     '.sn-miBadgeHost{background:var(--dsw-alias-bg-success,rgba(60,160,90,.16));color:var(--dsw-alias-label-success,#2f7d4f)}',
     '.sn-miBadgeL2{background:var(--dsw-alias-bg-info,rgba(60,110,200,.14));color:var(--dsw-alias-label-info,#2c5fa8)}',
     '.sn-miBadgeNone{background:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.12));color:var(--dsw-alias-label-tertiary,#8a8a8a)}',
+    /* 侧边栏大面板（v0.3.0） */
+    '.sn-sbIcon{display:inline-flex;align-items:center;justify-content:center;color:var(--dsw-alias-label-secondary,#5c5c5c)}',
+    '.sn-sbIconActive{color:var(--dsw-alias-brand-primary,#3b82f6)}',
+    /* main 大面板：铺满主列，可滚动，内容列宽约束 */
+    '.sn-panel{height:100%;overflow-y:auto;overscroll-behavior:contain}',
+    '.sn-panelBody{padding:24px 28px 40px;box-sizing:border-box;min-height:100%}',
+    '.sn-panelInner{max-width:860px;margin:0 auto}',
   ].join('\n');
   document.head.appendChild(tag);
 }
@@ -264,6 +284,7 @@ function applyClientSurfaces(ctx: ClientContextLike, credentials: CredentialsFac
     setErrorLog: (on: boolean) => controller.setErrorLog(on),
     refreshErrorLog: () => void controller.refreshErrorLog(),
     toggleErrorLogRow: (index: number) => controller.toggleErrorLogRow(index),
+    setErrorLogMode: (mode: 'limits' | 'all') => controller.setErrorLogMode(mode),
     refreshModelInfo: () => void controller.refreshModelInfo(),
     editKeysIoText: (text: string) => controller.editKeysIoText(text),
     exportKeys: () => void controller.exportKeys(),
@@ -278,15 +299,6 @@ function applyClientSurfaces(ctx: ClientContextLike, credentials: CredentialsFac
       controller.editPool(field, text),
   });
 
-  ctx.slots.inject('settings.section', () => ctx.slots.register({
-    name: 'settings.section',
-    id: 'sensenova',
-    order: 13,
-    label: () => ctx.locale.bind('settings.sensenova')('nav'),
-    locale: 'settings.sensenova',
-    inject: injected,
-  }, SenseNovaSection) as () => void);
-
   ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register({
     name: 'settings.models.provider-card',
     key: 'llm-sensenova',
@@ -297,6 +309,23 @@ function applyClientSurfaces(ctx: ClientContextLike, credentials: CredentialsFac
       save: () => void controller.save(),
     }),
   }, SenseNovaProviderCard) as () => void);
+
+  // v0.3.0：侧边栏大面板 —— `sidebar.panellist` 入口 + `main` 中央面板成对注册。
+  // 复用同一份 injected props / SenseNovaSection，面板是唯一入口（设置页入口已移除）。
+  ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+    name: 'sidebar.panellist',
+    id: 'sensenova',
+    order: 30,
+    label: () => ctx.locale.bind('settings.sensenova')('nav'),
+    locale: 'settings.sensenova',
+  }, SenseNovaPanelIcon) as () => void);
+
+  ctx.slots.inject('main', () => ctx.slots.register({
+    name: 'main',
+    key: 'sensenova',
+    locale: 'settings.sensenova',
+    inject: injected,
+  }, SenseNovaPanel) as () => void);
 }
 
 export const inject = ['slots', 'locale', 'connection', 'remote', 'configForms'];

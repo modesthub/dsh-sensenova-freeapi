@@ -1,8 +1,10 @@
 /**
- * SenseNova 限流事件记录器（W4，2026-09-17）。
+ * SenseNova 运行日志记录器（W4 起为「限流事件记录器」，v0.5 P0 升级为「运行日志」）。
  *
- * 目的：把「每一次限流」落成结构化 JSONL，供事后统计（哪个 error.code 最常见、
- * 哪个账号/key 老是被限、退避档位实际走到第几档、轮换是否真的发生）。
+ * 目的：把「每一次上游请求的结果」落成结构化 JSONL，供事后统计与排查 ——
+ * 哪个 error.code 最常见、哪个账号/key 老是被限、退避档位实际走到第几档、
+ * 轮换是否真的发生、单次往返耗时多少。v0.5 起**成功也记**（不再只有限流事件），
+ * 但面板默认聚焦「限流/异常」，成功行由 UI 过滤，不占默认视野。
  * 会话日志（`$DSH_HOME/sessions/`）里只有 `assistant/attempt` 的失败摘要，
  * 且与会话内容混在一起，做分布统计很别扭；这里独立成一条流。
  *
@@ -35,8 +37,17 @@ export const ERROR_LOG_MAX_CONSECUTIVE_FAILURES = 3;
 /** message 摘要长度上限（原始体可能很长，且常常重复）。 */
 export const ERROR_LOG_MESSAGE_MAX_CHARS = 200;
 
-/** 日志文件相对 DSH home 的路径段。 */
-export const ERROR_LOG_SEGMENTS: readonly string[] = ['logs', 'sensenova-errors.jsonl'];
+/**
+ * 日志文件相对 DSH home 的路径段。
+ *
+ * 🔴 v0.5 P0（2026-10-31）从 `sensenova-errors.jsonl` 改为 `sensenova-runtime.jsonl`：
+ * 日志语义从「只有限流事件」升级为「每次请求的运行日志」（成功也记）——旧文件名
+ * 会误导。旧文件保留兼容读取（见 error-log-api 的 source=errors 参数），不再写入。
+ */
+export const ERROR_LOG_SEGMENTS: readonly string[] = ['logs', 'sensenova-runtime.jsonl'];
+
+/** 旧版「仅限流事件」日志文件路径段（只读兼容；不再写入）。 */
+export const LEGACY_ERROR_LOG_SEGMENTS: readonly string[] = ['logs', 'sensenova-errors.jsonl'];
 
 /**
  * 一条限流事件。字符串字段一律存在（未知写空串），便于 `jq` 直接按字段过滤。
@@ -127,6 +138,31 @@ export interface SenseNovaRateLimitEvent {
    * 的约定（见 `tests/error-log.test.ts` 的脱敏断言）依然成立。
    */
   accountRef?: string;
+
+  // ── v0.5 P0（2026-10-31）运行日志升级，新增字段 ──────────────────────────────
+  /**
+   * 事件阶段（v0.5 新增）：`request`（首次请求）/ `retry`（插件内原地等待后重试）/
+   * `rotate`（换 key 后重试）/ `stream`（流式接收）/ `probe`（探针）。限流事件里
+   * 该字段标 `request|retry|rotate` 之一；成功事件的 `stream` 表示流收完。
+   */
+  phase?: string;
+  /**
+   * 结果（v0.5 新增）：`ok`（成功）/ `error`（失败）/ `interrupted`（被中止）。
+   * 旧限流事件省略该字段（隐含 error）。
+   */
+  result?: string;
+  /** 单次上游往返耗时（毫秒，v0.5 新增）。 */
+  latencyMs?: number;
+  /** 命中的「单位请求组」索引（0 起，v0.5 P1 组粒度新增；落地前恒缺省）。 */
+  groupIndex?: number;
+  /** 本次实际应用的组间延时（毫秒，v0.5 P1 AIMD 组间隙新增）。 */
+  groupGapMs?: number;
+  /**
+   * 测试期诊断字段：错误体原文尾部（≤500 字符），供观察商汤真实返回结构；
+   * P3 收敛时删除。**绝不含 key 原文**（错误体不落密钥的假设由 upstream 保证，若
+   * 违反会在这里暴露——这正是它存在的意义）。
+   */
+  _rawBodyTail?: string;
 }
 
 /**
@@ -181,7 +217,8 @@ export function resolveDshHome(env: Record<string, string | undefined> = process
 }
 
 /**
- * 默认日志文件绝对路径：`$DSH_HOME/logs/sensenova-errors.jsonl`。
+ * 默认日志文件绝对路径：`$DSH_HOME/logs/sensenova-runtime.jsonl`（v0.5 P0 起；旧名
+ * `sensenova-errors.jsonl` 保留兼容读取，见 `LEGACY_ERROR_LOG_SEGMENTS`）。
  * @param env - 环境映射（测试可注入）。
  * @returns 绝对路径。
  */
@@ -189,7 +226,7 @@ export function defaultErrorLogPath(env: Record<string, string | undefined> = pr
   return join(resolveDshHome(env), ...ERROR_LOG_SEGMENTS);
 }
 
-/** 滚动目标路径：`sensenova-errors.jsonl` → `sensenova-errors.1.jsonl`。 */
+/** 滚动目标路径：`sensenova-runtime.jsonl` → `sensenova-runtime.1.jsonl`。 */
 function rolledPath(filePath: string): string {
   const suffix = '.jsonl';
   return filePath.endsWith(suffix)

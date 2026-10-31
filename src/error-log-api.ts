@@ -6,7 +6,7 @@
  * 鉴权 ⇒ client 侧 `fetch` 就能用，省掉一层 codegen/类型声明。
  *
  * 三条硬约束（都来自"这是设置页里的一小块区域"这个定位）：
- *  1. **不全量回传**：`sensenova-errors.jsonl` 上限 5 MB，直接塞给浏览器会卡。
+ *  1. **不全量回传**：日志文件上限 5 MB，直接塞给浏览器会卡。
  *     ⇒ 读文件后只在 host 侧聚合，client 只拿「三个数字 + 最近 N 条」。
  *  2. **懒创建、缺失即正常**：文件只在第一次真实 429 时出现 ⇒ 不存在时返回
  *     `available: false` 而不是报错（否则设置页会一直显示红字）。
@@ -15,9 +15,12 @@
  */
 
 import { open, readFile, stat } from 'node:fs/promises';
+import { join } from 'node:path';
 import {
   ERROR_LOG_MESSAGE_MAX_CHARS,
+  LEGACY_ERROR_LOG_SEGMENTS,
   defaultErrorLogPath,
+  resolveDshHome,
   type SenseNovaRateLimitEvent,
 } from './error-log.ts';
 
@@ -43,11 +46,21 @@ export interface ErrorLogEntry {
   ts: string;
   model: string;
   code: string;
-  /** `'rate'`（code 8）/ `'rpm'`（请求数限流）/ `'tpm'`（token 限流）/ `''`。 */
+  /** `'rate'`（code 8）/ `'rpm'`（请求数限流）/ `'tpm'`（token 限流）/ `'quota_exhausted'`（真配额耗尽）/ `''`。 */
   kind: string;
   rotated: boolean;
   attempt: number;
   message: string;
+  /** 事件阶段（v0.5 新增）：`request|retry|rotate|stream|probe`。 */
+  phase?: string;
+  /** 结果（v0.5 新增）：`ok|error|interrupted`。 */
+  result?: string;
+  /** 单次上游往返耗时（毫秒，v0.5 新增）。 */
+  latencyMs?: number;
+  /** 命中的「单位请求组」索引（v0.5 P1 组粒度新增；落地前恒缺省）。 */
+  groupIndex?: number;
+  /** 本次实际应用的组间延时（毫秒，v0.5 P1 AIMD 组间隙新增）。 */
+  groupGapMs?: number;
   retryFloorMs?: number;
   providerRetryAfterMs?: number;
   /** 探测档位索引（0 起）；仅 rpm/tpm 有。长期停在最大值 = 档位锁死（2026-09-24 新增）。 */
@@ -140,6 +153,12 @@ function toEntry(event: SenseNovaRateLimitEvent): ErrorLogEntry {
     message: typeof event.message === 'string'
       ? event.message.slice(0, ERROR_LOG_MESSAGE_MAX_CHARS)
       : '',
+    // v0.5 P0：运行日志新增字段透传（phase/result/latencyMs/groupIndex/groupGapMs）。
+    ...(typeof event.phase === 'string' && event.phase !== '' ? { phase: event.phase } : {}),
+    ...(typeof event.result === 'string' && event.result !== '' ? { result: event.result } : {}),
+    ...(typeof event.latencyMs === 'number' ? { latencyMs: event.latencyMs } : {}),
+    ...(typeof event.groupIndex === 'number' ? { groupIndex: event.groupIndex } : {}),
+    ...(typeof event.groupGapMs === 'number' ? { groupGapMs: event.groupGapMs } : {}),
     ...(typeof event.retryFloorMs === 'number' ? { retryFloorMs: event.retryFloorMs } : {}),
     ...(typeof event.providerRetryAfterMs === 'number'
       ? { providerRetryAfterMs: event.providerRetryAfterMs }
@@ -229,6 +248,10 @@ async function readWithinLimit(filePath: string): Promise<{ text: string; trunca
  * 组装一次查询结果：读文件 → 解析 → 汇总。
  *
  * **绝不抛**：文件不存在（懒创建）、权限问题、解析异常，一律降级为空快照。
+ *
+ * @param options.source - 日志来源。`'runtime'`（默认）= 新运行日志 `sensenova-runtime.jsonl`；
+ *   `'errors'` = 旧「仅限流事件」文件 `sensenova-errors.jsonl`（v0.5 P0 兼容读取，
+ *   见 `LEGACY_ERROR_LOG_SEGMENTS`；其余值回退默认）。
  */
 export async function readErrorLogSnapshot(options: {
   filePath?: string;
@@ -236,8 +259,13 @@ export async function readErrorLogSnapshot(options: {
   limit?: number;
   now?: number;
   env?: Record<string, string | undefined>;
+  source?: 'runtime' | 'errors';
 } = {}): Promise<ErrorLogSnapshot> {
-  const filePath = options.filePath ?? defaultErrorLogPath(options.env ?? process.env);
+  const filePath =
+    options.filePath ??
+    (options.source === 'errors'
+      ? join(resolveDshHome(options.env ?? process.env), ...LEGACY_ERROR_LOG_SEGMENTS)
+      : defaultErrorLogPath(options.env ?? process.env));
   const windowMs = options.windowMs ?? ERROR_LOG_DEFAULT_WINDOW_MS;
   // ⚠️ 必须显式挡 NaN：`Math.max(1, NaN)` 返回 NaN，于是 `slice(NaN)` 退化成
   // `slice(0)` = 返回**全部**记录（既不报错也不是空），是最隐蔽的一种越界。
@@ -264,7 +292,10 @@ function numberParam(url: URL, key: string, fallback: number): number {
 }
 
 /**
- * HTTP 处理函数：`GET /api/sensenova/errorLog?limit=50&windowMs=86400000`。
+ * HTTP 处理函数：`GET /api/sensenova/errorLog?limit=50&windowMs=86400000&source=runtime|errors`。
+ *
+ * `source` 参数（v0.5 P0 新增）：`errors` = 读旧版「仅限流事件」文件
+ * `sensenova-errors.jsonl`（兼容读取）；缺省/其他值 = 新运行日志 `sensenova-runtime.jsonl`。
  *
  * ⚠️ **实测（2026-09-18）：`ctx.connection.fetch.register` 的 `methods` 在框架层就做了过滤** ——
  * 非 GET 请求不会被派发到这里，而是落回普通分发链、最终得到 **404**，不是本函数返回的 405。
@@ -276,9 +307,11 @@ export async function handleErrorLogHttp(request: Request): Promise<Response> {
     return new Response(null, { status: 405, headers: { allow: 'GET' } });
   }
   const url = new URL(request.url);
+  const sourceParam = url.searchParams.get('source');
   const snapshot = await readErrorLogSnapshot({
     limit: numberParam(url, 'limit', ERROR_LOG_DEFAULT_LIMIT),
     windowMs: numberParam(url, 'windowMs', ERROR_LOG_DEFAULT_WINDOW_MS),
+    ...(sourceParam === 'errors' ? { source: 'errors' as const } : {}),
   });
   return new Response(JSON.stringify(snapshot), {
     status: 200,

@@ -649,7 +649,7 @@ test('controller.refreshErrorLog: 默认 idle 不自动拉取；成功/非 200/�
     assert.equal(controller.state().diagnostics.status, 'ready');
     assert.equal(controller.state().diagnostics.total, 2);
     assert.equal(controller.state().diagnostics.entries.length, 2);
-    assert.equal(calls[0], '/api/sensenova/errorLog?limit=20', '请求路径与 limit 固定');
+    assert.equal(calls[0], '/api/sensenova/errorLog?limit=20&source=runtime', '请求默认读到 runtime 运行日志');
 
     globalThis.fetch = stubFetch(calls, () => Promise.resolve(jsonResponse({}, 500)));
     await controller.refreshErrorLog();

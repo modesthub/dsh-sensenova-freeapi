@@ -79,10 +79,10 @@ test('summarize: 折叠空白并截断', () => {
 
 test('defaultErrorLogPath: $DSH_HOME 优先，否则 ~/.dsh', () => {
   assert.equal(resolveDshHome({}), join(resolveDshHome({}), ''));
-  assert.ok(defaultErrorLogPath({}).endsWith(join('.dsh', 'logs', 'sensenova-errors.jsonl')));
+  assert.ok(defaultErrorLogPath({}).endsWith(join('.dsh', 'logs', 'sensenova-runtime.jsonl')));
   assert.equal(
     defaultErrorLogPath({ DSH_HOME: 'D:/custom-home' }),
-    join('D:/custom-home', 'logs', 'sensenova-errors.jsonl'),
+    join('D:/custom-home', 'logs', 'sensenova-runtime.jsonl'),
   );
   // 空白 DSH_HOME 视为未设置（不能落到当前工作目录）。
   assert.equal(

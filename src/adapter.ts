@@ -130,6 +130,30 @@ const FALLBACK_RETRY_POLICY: ResolvedRetryPolicy = resolveRetryPolicy(
 
 /** 配额类 429（code 8，rps/rpm exhausted）退避下限（毫秒）。2026-09-04 实测：速率桶补充 ≈1 个/14s，15s 覆盖一个完整补充周期。 */
 export const QUOTA_RATE_RETRY_FLOOR_MS = 15_000;
+/**
+ * 真·配额耗尽（`quota_exhausted`，v0.5 P0）的退避下限（毫秒）。
+ *
+ * 🔴 2026-10-31 新增：商汤 `insufficient_quota` 独立出现时是**真额度耗尽**（账户级配额
+ * 打满），恢复以分钟计；3s 起步的 tpm 探测档在这里是无效探测风暴（白打 key + 拖慢
+ * 宿主重试节奏）。取 300s = 与 `QUOTA_RETRY_AFTER_CEILING_MS` 同值，宿主重试预算内
+ * 一次性进入「冷静窗口」，期间不换 key（换 key 不增加账户配额，见 st-rotator 实测）。
+ */
+export const QUOTA_EXHAUSTED_RETRY_FLOOR_MS = 300_000;
+/**
+ * bili 网关「终端态限流」（424 bili_throttle_terminal）的退避下限（毫秒）。
+ *
+ * 🔴 2026-10-31（v0.5 P0）新增，对应真实报错：
+ * `424 {"error":{"type":"rate_limit_error","code":"bili_throttle_terminal","stage":"forward",
+ * "message":"upstream rate-limited 6 consecutive request(s) to token.sensenova.cn; bili stops
+ * amplifying after 5 consecutive rate limits — resend manually once the provider recovers
+ * (a background probe keeps checking at most every 30s) (#4204)","retryable":false}`
+ *
+ * 语义：上游（商汤账户池）连续 6 次限流 → bili 在连续 5 次后**停止转发放大**并进入终端态，
+ * 自身后台探针**至多每 30s** 检测一次上游恢复。撞上它时换 key / 换账户都没用（bili 侧已
+ * 熔断），唯一正确的动作是**按探针周期等一轮再重试** ⇒ providerRetryAfterMs ≈ 30s（+抖动），
+ * 对齐探针检查间隔，避免宿主无头苍蝇式秒级重试刷出更多 bili 终端态。
+ */
+const BILI_TERMINAL_RETRY_FLOOR_MS = 30_000;
 /** 生成请求连接/首字节超时（毫秒）。2026-09-04 实测：传输挂起 ≈1/5 且无 RST，45s 覆盖大 prompt 建连+首包（design D4/D6）。 */
 export const CONNECT_TIMEOUT_MS = 45_000;
 /** SSE 流空闲看门狗（毫秒）：距上一事件 ≥ 该值无任何 chunk/事件即按停摆结束。2026-09-04 实测：思考期渠道有空事件/心跳自然重置计时（design D4/D6）。 */
@@ -230,7 +254,7 @@ export interface SensenovaConnection {
    *
    * 默认开启（maxRetries **1**，2026-10-26 下调：3 次×20s=60s 的等待比宿主退避还长）；
    * `waitMs` 按模型取 {@link MODEL_CONNECT_RETRY_WAIT_MS}
-   * （deepseek-flash 15s / deepseek-v4-flash 10s / 其他 10s），设置里显式配 `waitMs`
+   * （2026-10-31 统一下调到 5s），设置里显式配 `waitMs`
    * 或 `modelWaitMs` 可覆盖；`maxRetries: 0` 关闭（行为与原版一致）。
    *
    * 2026-10-25 实测依据：
@@ -1477,6 +1501,17 @@ function isModelNotFoundText(errText: string): boolean {
   return lower.includes('model route not found') || lower.includes('model is not found');
 }
 
+/**
+ * 判断错误文本是否为 bili 网关「终端态限流」（424 bili_throttle_terminal）。
+ *
+ * 2026-10-31（v0.5 P0）新增。匹配** json 体里的 `bili_throttle_terminal`** 而非只看 HTTP
+ * 状态码：424 也可能被上游用于其他语义（如结算/配额），误把无关 424 当限流会平白多等 30s。
+ * 大小写不敏感 + 子串匹配，应对 code 字段把下划线写成驼峰之类的格式漂移。
+ */
+function isBiliTerminalText(errText: string): boolean {
+  return errText.toLowerCase().includes('bili_throttle_terminal');
+}
+
 /** 是否为 AbortSignal.timeout / 看门狗 / 排队超时产生的 TimeoutError。 */
 function isTimeoutReason(value: unknown): value is Error {
   return value instanceof Error && value.name === 'TimeoutError';
@@ -1520,7 +1555,7 @@ export interface RateLimit429Classification {
    * 今天实测有 37 条 RPM 记录被迫等待 **120 秒**（秒级窗口等 2 分钟纯属浪费）。
    * 更糟的是它会**推高 TPM 的探测计数** —— 两类事件互相污染，档位只升不降。
    */
-  kind: 'rate' | 'rpm' | 'tpm' | undefined;
+  kind: 'rate' | 'rpm' | 'tpm' | 'quota_exhausted' | undefined;
 }
 
 /**
@@ -1583,6 +1618,20 @@ const QUOTA_ALIAS_CODES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * 🔴 2026-10-31（v0.5 P0）从 {@link QUOTA_ALIAS_CODES} 拆出的**真·配额耗尽** code。
+ *
+ * 为什么拆：`insufficient_quota` 在商汤有**两种截然不同的语义** —— 早期实测里它挂在
+ * `inference exceeds tpm/rpm limit` 下（别名、秒级可自愈）；但 v0.5 实测在新的上游限流
+ * 治理（bili 网关）下，`insufficient_quota` 独立出现时是**真额度耗尽**（分钟级到更长），
+ * 与 tpm 的 3s 起步探测档**数量级不同**。v0.5 方案 §2 决定：真配额耗尽 → kind
+ * `'quota_exhausted'`、冷却 ≥300s、**不参与 AIMD 组间隙**（撞上它按指数全池退避）。
+ *
+ * 判定次序（见 {@link classify429Body}）必须在 isRpmCode 与 message 兜底**之前**：
+ * 该 code 的 message 常同时含 tpm/rpm 措辞，后两步会把它误塞进 tpm/rpm 档位。
+ */
+const QUOTA_EXHAUSTED_CODES: ReadonlySet<string> = new Set(['insufficient_quota']);
+
+/**
  * 是否为**请求数**限流（rpm）的 code。
  *
  * 🔴 为什么用模式匹配而不是白名单：商汤的 code 会随版本漂移（2026-09-23 起
@@ -1640,6 +1689,12 @@ export function classify429Body(bodyText: string): RateLimit429Classification {
   if (code === 429001 || code === '429001') {
     return { quota: true, retryFloorMs: TPM_PROBE_BACKOFF_STEPS_MS[0], kind: 'tpm' };
   }
+  // 🔴 2026-10-31（v0.5 P0）：真·配额耗尽（见 QUOTA_EXHAUSTED_CODES）。必须在
+  // isRpmCode 与 message 兜底**之前**：该 code 的 message 常同时含 tpm/rpm 措辞，
+  // 后两步会把它误塞进 tpm/rpm 档位（3s 起步），而真耗尽需要分钟级的全池冷却。
+  if (typeof code === 'string' && QUOTA_EXHAUSTED_CODES.has(code)) {
+    return { quota: true, retryFloorMs: QUOTA_EXHAUSTED_RETRY_FLOOR_MS, kind: 'quota_exhausted' };
+  }
   // 🔴 必须在 message 兜底**之前**：`inference exceeds tpm/rpm limit` 这句 message
   // 同时含 "tpm" 与 "rpm"，下面的正则必然先命中 tpm ⇒ 请求数限流会被塞进
   // token 限流的 120s 档位（2026-09-24 实测 37 条 RPM 记录被迫等 120 秒）。
@@ -1675,20 +1730,20 @@ export function classify429Body(bodyText: string): RateLimit429Classification {
 const RETRY429_JITTER_RATIO = 0.3;
 
 /**
- * 撞 429 后「插件内原地等待重试」的**按模型默认等待**（毫秒，2026-10-25 实测标定）。
+ * 撞 429 后「插件内原地等待重试」的**按模型默认等待**（毫秒）。
  *
- * - `deepseek-flash`（V4.1）：大请求 24k tokens 受 TPM 严格限制，恢复 15~30s → 15s（1 次）
- * - `deepseek-v4-flash`：配额宽松（单账户连发 4 个大请求全过），10s 足够
- * - 其他：取 10s 保守值
+ * 2026-10-31 用户要求统一下调到 5s：官方已对「80 key 直轮」限流收紧，
+ * 长等待（15s/10s）在限流窗口内只会白占并发槽位；5s 足够让 rps/rpm 桶
+ * 走完一个最小恢复窗口，又不会把单次请求的墙钟时间拖长。
  *
- * 覆盖顺序：connection.connectRetry.modelWaitMs[model] > connectRetry.waitMs > 本表 > 10000
+ * 覆盖顺序：connection.connectRetry.modelWaitMs[model] > connectRetry.waitMs > 本表 > 5000
  */
 const MODEL_CONNECT_RETRY_WAIT_MS: Readonly<Record<string, number>> = Object.freeze({
-  'deepseek-flash': 15_000,
-  'deepseek-v4-flash': 10_000,
+  'deepseek-flash': 5_000,
+  'deepseek-v4-flash': 5_000,
 });
 /** 未命中模型表时的兜底等待（毫秒）。 */
-const DEFAULT_CONNECT_RETRY_WAIT_MS = 10_000;
+const DEFAULT_CONNECT_RETRY_WAIT_MS = 5_000;
 
 /**
  * 429 退避的「基础值」计划（纯函数）。
@@ -1767,6 +1822,32 @@ function httpError(status: number, errText: string, retryAfterMs: number | undef
       'llm-sensenova: SenseNova model is not routable — the model id is no longer served；SenseNova 模型不可路由：该模型 id 已下线',
       MODEL_NOT_FOUND_CODE,
       { status: 404 },
+    );
+  }
+  // 🔴 2026-10-31（v0.5 P0）：bili 网关「终端态限流」特判。见 BILI_TERMINAL_RETRY_FLOOR_MS
+  // 的注释：上游连续 5+ 次限流后 bili 停止放大并熔断，换 key 无用，只能等探针周期（≤30s）
+  // 过后重新尝试。按 RATE_LIMIT + providerRetryAfterMs≈30s 交宿主重试层自动退避重试，
+  // 对齐探针一轮，避免秒级空转刷出更多 424。凡 424 且体带 `bili_throttle_terminal` 即命中。
+  if (status === 424 && isBiliTerminalText(errText)) {
+    const plan = plan429RetryAfterMs(
+      { quota: true, retryFloorMs: BILI_TERMINAL_RETRY_FLOOR_MS, kind: 'rate' },
+      undefined,
+      retryAfterMs,
+    );
+    const providerRetryAfterMs =
+      plan !== undefined
+        ? (plan.respectHeader
+            ? Math.min(plan.baseMs, QUOTA_RETRY_AFTER_CEILING_MS)
+            : applyUpwardJitter(plan.baseMs, QUOTA_RETRY_AFTER_CEILING_MS, Math.random))
+        : undefined;
+    const detail = rateLimitDetail(errText);
+    return new LlmError(
+      `llm-sensenova: SenseNova API error 424 — bili terminal rate limit (${detail})；SenseNova API 返回 424：上游连续限流已熔断（bili_throttle_terminal），等待探针周期后重试`,
+      'RATE_LIMIT',
+      {
+        status: 424,
+        ...(providerRetryAfterMs !== undefined ? { providerRetryAfterMs } : {}),
+      },
     );
   }
   if (status === 429) {
@@ -2009,6 +2090,14 @@ export class SensenovaAdapter extends LlmAdapter {
       for (let rotations = 0; ; ) {
         attemptIndex += 1;
         tried.add(apiKey);
+        // v0.5 P0：运行日志的 phase 归一。本轮 attempt 是哪种性质——
+        //   rotate   换 key 后重试（rotations 已递增）
+        //   retry    插件内原地等待后重试（internalRetries 已递增）
+        //   request  首次请求
+        // 两计数可能同时非零（先等再换），优先级 rotate > retry > request。
+        const attemptPhase = rotations > 0 ? 'rotate' : internalRetries > 0 ? 'retry' : 'request';
+        // v0.5 P0：单次上游往返耗时（毫秒，建连→响应头）。
+        const attemptStart = Date.now();
         // 按本次 attempt 实际使用的 key 获取并发额度；排队期间中止会在此 reject
         // （不占额度），排队超时以 TimeoutError reject（同样不占额度），统一映射
         // 可重试 TIMEOUT 交宿主重试层（design D4）。await 抛出时 release 保持
@@ -2078,6 +2167,31 @@ export class SensenovaAdapter extends LlmAdapter {
           // 若它正处于阻塞态（被本轮借用后打成功）⇒ 立即挂回运行态末尾。
           this.deps.reportSuccess?.(apiKey);
           probeResetBySuccess = true;
+          // v0.5 P0：请求成功也记一条运行日志（phase=attemptPhase, result=ok,
+          // latencyMs=attempt 往返耗时）。「全记」是测试阶段的采样口径（E=全记），
+          // 面板默认聚焦限流/异常来过滤成功洪峰。
+          this.deps.errorLog?.()?.record({
+            ts: new Date().toISOString(),
+            model: options.model,
+            status: 200,
+            code: '',
+            kind: '',
+            quota: false,
+            message: '',
+            phase: attemptPhase,
+            result: 'ok',
+            latencyMs: Date.now() - attemptStart,
+            rotated: rotations > 0,
+            attempt: attemptIndex,
+            account: fingerprint(apiKey),
+            ...(() => {
+              const described = this.deps.describeKey?.(apiKey);
+              return described !== undefined
+                ? { accountLabel: described.label, accountRef: described.ref }
+                : {};
+            })(),
+            session: fingerprint(options.sessionId),
+          });
           break; // 额度随 response 保留，由外层 finally 在流结束后释放
         }
         const errText = await attempt.text().catch(() => '');
@@ -2088,6 +2202,20 @@ export class SensenovaAdapter extends LlmAdapter {
           release();
           release = undefined;
           this.failedModels.add(options.model);
+          throw httpError(attempt.status, errText, retryAfterMs);
+        }
+        // 🔴 2026-10-31（v0.5 P0）：bili 网关「终端态限流」（424 bili_throttle_terminal）短路。
+        //
+        // 为什么必须**在 classify429Body 之前**退出：该体 message 含 "rate-limited"（命中
+        // message 兜底的 /rate.?limit/），会误分类成 kind='tpm' → 触发 `reportRateLimit('tpm')`
+        // 记 strike 甚至**误踢运行态 key**、并推高 TPM 退避档位。但 424 是**账户池级熔断**
+        // （bili 已停止放大，不因换 key/记 strike 而恢复），这些副作用全是误伤。
+        // 正确动作只有一条：按 RATE_LIMIT 抛给宿主，providerRetryAfterMs 由 httpError 的
+        // 424 特判给出（≈30s，对齐 bili 后台探针周期 ≤30s），由宿主自动退避重试。
+        const biliTerminal = attempt.status === 424 && isBiliTerminalText(errText);
+        if (biliTerminal) {
+          release();
+          release = undefined;
           throw httpError(attempt.status, errText, retryAfterMs);
         }
         // 429：SenseNova 渠道常态性限流，不代表账号异常。不冷却账号；默认不轮换 key
@@ -2150,6 +2278,11 @@ export class SensenovaAdapter extends LlmAdapter {
             kind: classified.kind ?? '',
             quota: classified.quota,
             message: summarize(rateLimitDetail(errText)),
+            // v0.5 P0：限流事件统一带 phase/result/latencyMs（与成功事件同口径，
+            // 供面板「限流/全部」过滤与耗时统计）。
+            phase: attemptPhase,
+            result: 'error',
+            latencyMs: Date.now() - attemptStart,
             ...(eventFloorMs !== undefined ? { retryFloorMs: eventFloorMs } : {}),
             ...(retryAfterMs !== undefined && retryAfterMs > 0 ? { retryAfterHeaderMs: retryAfterMs } : {}),
             ...(outcome.providerRetryAfterMs !== undefined ? { providerRetryAfterMs: outcome.providerRetryAfterMs } : {}),

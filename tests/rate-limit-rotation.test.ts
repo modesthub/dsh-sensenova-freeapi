@@ -88,10 +88,10 @@ test('classify429Body：429001 → tpm 档', () => {
   assert.equal(c.kind, 'tpm');
 });
 
-test('classify429Body：insufficient_quota → 可轮换（修复点，此前不识别）', () => {
+test('classify429Body：insufficient_quota → quota_exhausted（v0.5 P0 从 tpm 别名拆出，≥300s 冷静）', () => {
   const c = classify429Body('{"error":{"code":"insufficient_quota","message":"inference exceeds tpm/rpm limit"}}');
   assert.equal(c.quota, true);
-  assert.equal(c.kind, 'tpm');
+  assert.equal(c.kind, 'quota_exhausted');
 });
 
 test('classify429Body：ModelAccountTpmRateLimitExceeded → 可轮换', () => {

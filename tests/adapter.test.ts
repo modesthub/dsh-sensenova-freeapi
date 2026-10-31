@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { LlmError } from '@deepseek-ai/dsh-llm';
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
-import { SensenovaAdapter, QUOTA_RETRY_AFTER_CEILING_MS, TPM_PROBE_BACKOFF_STEPS_MS, type SensenovaConnection } from '../src/adapter.ts';
+import { SensenovaAdapter, QUOTA_RETRY_AFTER_CEILING_MS, QUOTA_EXHAUSTED_RETRY_FLOOR_MS, TPM_PROBE_BACKOFF_STEPS_MS, type SensenovaConnection } from '../src/adapter.ts';
 import { KeyedConcurrencyGate } from '../src/concurrency.ts';
 import { fingerprint, type SenseNovaErrorLog, type SenseNovaRateLimitEvent } from '../src/error-log.ts';
 import { resolveAdapterOptions } from '../src/index.ts';
@@ -930,10 +930,9 @@ test('classify429Body: 已知形态精确分类（含别名 code），其余一�
     { quota: true, retryFloorMs: TPM_PROBE_BACKOFF_STEPS_MS[0], kind: 'tpm' },
   );
   // 别名 code（2026-09-14 修复）：命名像"配额耗尽"，message 实为 tpm/rpm 限流 → 按 TPM 档
-  assert.deepEqual(
-    classify429Body('{"error":{"message":"inference exceeds tpm/rpm limit","code":"insufficient_quota"}}'),
-    { quota: true, retryFloorMs: TPM_PROBE_BACKOFF_STEPS_MS[0], kind: 'tpm' },
-  );
+  // 🔴 2026-10-31（v0.5 P0）：`insufficient_quota` 改为**真配额耗尽**分类（quota_exhausted，
+  // ≥300s 冷静窗口），从别名集拆出；其余别名（ModelAccountTpmRateLimitExceeded /
+  // quota_exceeded_error）仍按 TPM 档走。见下方独立用例。
   assert.deepEqual(
     classify429Body('{"error":{"message":"inference exceeds tpm/rpm limit","code":"ModelAccountTpmRateLimitExceeded"}}'),
     { quota: true, retryFloorMs: TPM_PROBE_BACKOFF_STEPS_MS[0], kind: 'tpm' },
@@ -944,6 +943,56 @@ test('classify429Body: 已知形态精确分类（含别名 code），其余一�
   assert.deepEqual(classify429Body('{"error":{"message":"bad request","code":"400"}}'), fallback);
   assert.deepEqual(classify429Body('rate limited'), fallback);
   assert.deepEqual(classify429Body(''), fallback);
+});
+
+test('classify429Body: insufficient_quota 独立出现 → quota_exhausted（≥300s，v0.5 P0）', () => {
+  // 🔴 v0.5 P0（2026-10-31）从 QUOTA_ALIAS_CODES 拆出：`insufficient_quota` 独立出现时是
+  // 真·配额耗尽（账户级打满，分钟级恢复），不再是 tpm 别名（3s 起步档位）。
+  // 它必须**优先于** message 兜底 —— 该 code 的 message 常含 "tpm/rpm" 措辞。
+  assert.deepEqual(
+    classify429Body('{"error":{"message":"insufficient_quota","type":"quota_exhausted_error","code":"insufficient_quota"}}'),
+    { quota: true, retryFloorMs: QUOTA_EXHAUSTED_RETRY_FLOOR_MS, kind: 'quota_exhausted' },
+  );
+  assert.deepEqual(
+    classify429Body('{"error":{"message":"inference exceeds tpm/rpm limit","code":"insufficient_quota"}}'),
+    { quota: true, retryFloorMs: QUOTA_EXHAUSTED_RETRY_FLOOR_MS, kind: 'quota_exhausted' },
+  );
+  // 其他别名（ModelAccountTpmRateLimitExceeded / quota_exceeded_error）仍按 tpm 别名处理。
+  assert.deepEqual(
+    classify429Body('{"error":{"message":"inference exceeds tpm/rpm limit","code":"ModelAccountTpmRateLimitExceeded"}}'),
+    { quota: true, retryFloorMs: TPM_PROBE_BACKOFF_STEPS_MS[0], kind: 'tpm' },
+  );
+});
+
+test('stream: 424 bili_throttle_terminal → RATE_LIMIT + 30s 退避且不轮换/不记 tpm strike（v0.5 P0）', async () => {
+  // 🔴 2026-10-31（v0.5 P0，真实报错 #4204）：bili 网关连续 5+ 次上游限流后停止放大并熔断，
+  // 自身后台探针至多每 30s 检测一次恢复。插件正确动作 = 短路（不换 key、不记 strike、
+  // 不推高退避档位），按 RATE_LIMIT + providerRetryAfterMs≈30s 抛给宿主对齐探针一轮。
+  const { adapter, calls, rotateCalls } = chatAdapter(() =>
+    new Response(
+      JSON.stringify({
+        error: {
+          type: 'rate_limit_error',
+          code: 'bili_throttle_terminal',
+          stage: 'forward',
+          message: 'upstream rate-limited 6 consecutive request(s) to token.sensenova.cn; bili stops amplifying after 5 consecutive rate limits — resend manually once the provider recovers (a background probe keeps checking at most every 30s) (#4204)',
+          retryable: false,
+        },
+      }),
+      { status: 424 },
+    ),
+  );
+
+  await assert.rejects(collect(adapter, OPTIONS), (err: unknown) => {
+    assert.ok(err instanceof LlmError);
+    const e = err as LlmError;
+    assert.equal(e.code, 'RATE_LIMIT');
+    assert.equal(e.failure.status, 424);
+    assertRetryFloor(e.failure.providerRetryAfterMs, 30_000, 'bili 终端态 30s 探针周期');
+    return true;
+  });
+  assert.equal(calls(), 1, '短路直接抛，不内部重试');
+  assert.equal(rotateCalls.length, 0, 'bili 熔断与 key 无关，绝不轮换');
 });
 
 test('stream: 配额类 429（code 8）→ RATE_LIMIT 携带 15000ms 退避下限且不轮换', async () => {
