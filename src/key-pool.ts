@@ -39,12 +39,23 @@ export interface KeyPoolParams {
   capacity: number
 }
 
-/** 池策略缺省值。 */
+/**
+ * 池策略缺省值。
+ *
+ * 2026-11-01 修正探测参数（方案文档 §1.7）：原值 3s / 倍率 1 / 上限 3s 意味着
+ * **永不退避的 3 秒轮询**——4 个阻塞 key 一小时能打出 4,800 次探测，而实测
+ * 恢复尺度是分钟到小时，3 秒轮询纯属噪声，且每次都在给网关的「连续 429」计数 +1。
+ *
+ * 新值 120s 起、×2 翻倍、600s 封顶 ⇒ 单 key 每小时探测次数从 1,200 降到 ~12。
+ *
+ * 注：上面 `KeyPoolParams` 的 JSDoc 里写的「默认 15000 / 倍率 2 / 60000 / 容量 10」
+ * 是更早一版的设计意图，与代码长期不符（2026-11-01 发现）。以本常量为准。
+ */
 export const DEFAULT_KEY_POOL_PARAMS: Readonly<KeyPoolParams> = Object.freeze({
   kickThreshold: 2,
-  probeInitialMs: 3_000,
-  probeBackoffFactor: 1,
-  probeMaxMs: 3_000,
+  probeInitialMs: 600_000,
+  probeBackoffFactor: 2,
+  probeMaxMs: 600_000,
   capacity: 100,
 })
 

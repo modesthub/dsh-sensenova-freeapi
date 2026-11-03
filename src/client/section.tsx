@@ -4,6 +4,9 @@
  */
 import { useState } from 'react';
 import * as React from 'react';
+import { KeyPoolEditor } from './key-pool-editor';
+import { accountNumberOf, distinctAccountCount, minGroupGapMs, slotOf, smartGroupGapMs } from './key-pool-plan';
+import type { PoolKeyRef, SchedGroupPlan } from './key-pool-plan';
 import {
   DEFAULT_API_BASE,
   DEFAULT_ERROR_LOG,
@@ -17,14 +20,17 @@ import type {
   ErrorLogState,
   FieldName,
   KeysIoState,
-  KeysStatusState,
   ModelInfoSnapshotView,
   ModelInfoState,
   ModelParamView,
   PoolNumberField,
   RetryNumberField,
+  SchedulingDraft,
+  SchedulingNumberField,
   SettingsState,
   TranslateFn,
+  VisionBridgeMode,
+  VisionDraft,
 } from './settings';
 
 interface ReactHooks {
@@ -52,6 +58,8 @@ export interface SenseNovaSectionProps {
   save: () => void;
   discard: () => void;
   addAccount: () => void;
+  /** 在指定账户下新增一把 key（空位面板），返回新账户 id。 */
+  addAccountKey: (account: number, key: string) => string | undefined;
   removeAccount: (id: string) => void;
   editAccountLabel: (id: string, text: string) => void;
   editAccountKey: (id: string, text: string) => void;
@@ -67,7 +75,7 @@ export interface SenseNovaSectionProps {
   /** 错误记录诊断区块：展开/收起某一行。 */
   toggleErrorLogRow: (index: number) => void;
   /** 运行日志展示模式切换（v0.5 P0）：`'limits'` = 只显示限流/异常，`'all'` = 全部。 */
-  setErrorLogMode: (mode: 'limits' | 'all') => void;
+  setErrorLogMode: (mode: 'limits' | 'vision' | 'all') => void;
   /** 「当前模型 + 全部参数」面板：拉取快照（只读，2026-09-23 Phase 5）。 */
   refreshModelInfo: () => void;
   /** Key 导入 / 导出：编辑文本框内容（v0.2.1）。 */
@@ -78,8 +86,6 @@ export interface SenseNovaSectionProps {
   importKeys: () => void;
   /** 顶部「刷新」：重查凭据状态（兜底手动刷新，v0.2.4）。 */
   refreshCredentials: () => void;
-  /** Key 池状态：拉取当前 key + 下一把 + 池把数（v0.2.7）。 */
-  refreshKeysStatus: () => void;
   /** 清空全部额外账户（staged，保存后生效；v0.2.5）。 */
   clearAllAccounts: () => void;
   /** 重试策略：模式单选（W1 2026-09-17）。 */
@@ -88,6 +94,24 @@ export interface SenseNovaSectionProps {
   editRetry: (field: RetryNumberField, text: string) => void;
   /** key 池策略：数字字段编辑（2026-09-27）。 */
   editPool: (field: PoolNumberField, text: string) => void;
+  /** 调度策略：模式切换（2026-11-01）。 */
+  setSchedMode: (mode: string) => void;
+  /** 调度策略：分组形状切换（2026-11-02）。 */
+  setSchedGrouping: (grouping: string) => void;
+  /** 调度策略：分组计划（每账户切几组，2026-11-02）。 */
+  setSchedGroups: (plan: SchedGroupPlan[]) => void;
+  /** 智能分组：按 4 个一组重排（导入后自动执行一次，手动可重做）。 */
+  smartGroupAll: () => void;
+  /** 调度策略：数字字段编辑（2026-11-01）。 */
+  editSched: (field: SchedulingNumberField, text: string) => void;
+  /** 智能组间定时：按实际账户数推荐组间定时。 */
+  smartGroupGap: () => void;
+  /** 视觉辅助：总开关。 */
+  setVisionEnabled: (on: boolean) => void;
+  /** 视觉辅助：读图桥模式。 */
+  setVisionBridgeMode: (mode: VisionBridgeMode) => void;
+  /** 视觉辅助：模型链 / 超时 / 提示词编辑。 */
+  editVisionField: (field: 'modelChain' | 'timeoutMs' | 'bridgePrompt', text: string) => void;
 }
 
 function useSavedFlash(savedCount: number): boolean {
@@ -106,7 +130,7 @@ function useSavedFlash(savedCount: number): boolean {
 }
 
 /** 凭据状态徽标：已配置 / 未配置。 */
-function StatusBadge({ configured, t }: { configured: boolean; t: TranslateFn }): JSX.Element {
+export function StatusBadge({ configured, t }: { configured: boolean; t: TranslateFn }): JSX.Element {
   return (
     <span className={configured ? 'sn-badge' : 'sn-badgeMuted'}>
       {configured ? t('apiKeySet') : t('apiKeyUnset')}
@@ -119,7 +143,7 @@ function addCredentialReference(refs: Set<string>, value: string): void {
   if (normalized !== '') refs.add(normalized);
 }
 
-function credentialReferences(state: SettingsState): ReadonlySet<string> {
+export function credentialReferences(state: SettingsState): ReadonlySet<string> {
   const refs = new Set<string>();
   addCredentialReference(refs, state.apiKeyEnv);
   for (const account of state.accounts) addCredentialReference(refs, account.ref);
@@ -135,7 +159,7 @@ function isCredentialReference(label: string, refs: ReadonlySet<string>): boolea
   return false;
 }
 
-function accountDisplayLabel(
+export function accountDisplayLabel(
   account: { labelDraft: string },
   index: number,
   t: TranslateFn,
@@ -535,58 +559,6 @@ function formatClock(ts: string): string {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-/**
- * 错误记录诊断区块（只读，2026-09-18）。
- *
- * 刻意**不自动拉取**：打开设置页本身不该产生 I/O，而多数人进来是为了改配置。
- * 用户点「刷新」才请求一次，之后可反复点。
- */
-/** 「导入 / 导出 Key」区块（v0.2.1）：导出走 host 只读路由，导入直接写凭据域。 */
-/**
- * Key 池状态面板（v0.2.7）：当前 key + 下一把（半隐形态）+ 池把数。
- * 撞 429 换 key 时 state.flash 置起，触发 1.2s 切换动画。
- */
-function KeyStatusPanel(props: {
-  t: TranslateFn;
-  state: KeysStatusState;
-  onRefresh: () => void;
-}): JSX.Element {
-  const { snapshot, status, flash } = props.state;
-  if (status === 'loading' && snapshot === undefined) {
-    return (
-      <div className="sn-keyStatus">
-        <span className="sn-hint">{props.t('keyStatusLoading')}</span>
-      </div>
-    );
-  }
-  if (snapshot === undefined || !snapshot.available) {
-    return (
-      <div className="sn-keyStatus">
-        <span className="sn-hint">{props.t('keyStatusUnavailable')}</span>
-        <button type="button" className="sn-reset" onClick={props.onRefresh}>
-          {props.t('refresh')}
-        </button>
-      </div>
-    );
-  }
-  const currentClass = flash ? 'sn-keyCurrent sn-keyFlash' : 'sn-keyCurrent';
-  return (
-    <div className="sn-keyStatus">
-      <span className="sn-hint">{props.t('keyStatusCurrent')}</span>
-      <span className={currentClass}>{snapshot.currentLabel ?? props.t('keyStatusNone')}</span>
-      {snapshot.nextLabel !== undefined ? (
-        <span className="sn-keyNext">{props.t('keyStatusNext')} {snapshot.nextLabel}</span>
-      ) : null}
-      <span className="sn-hint">
-        {props.t('keyStatusPool', { running: snapshot.running, blocked: snapshot.blocked, size: snapshot.size })}
-      </span>
-      <button type="button" className="sn-reset" onClick={props.onRefresh}>
-        {props.t('refresh')}
-      </button>
-    </div>
-  );
-}
-
 
 function KeysIoPanel(props: {
   t: TranslateFn;
@@ -649,15 +621,19 @@ function ErrorLogPanel(props: {
   state: ErrorLogState;
   onRefresh: () => void;
   onToggleRow: (index: number) => void;
-  onSetMode: (mode: 'limits' | 'all') => void;
+  onSetMode: (mode: 'limits' | 'vision' | 'all') => void;
 }): JSX.Element {
   const log = props.state;
   const busy = log.status === 'loading';
   // v0.5 P0：「限流」模式 = 只显示限流/异常行（result !== 'ok'，含旧日志无 result 的行）。
   // 过滤是纯显示层动作，不动 state.entries —— 展开下标仍按原始索引对齐。
+  // 三档（2026-11-02 加 'vision'）：视觉行成功时 result='ok'，在「限流」档看不到，
+  // 而视觉调用恰恰是最需要单独观察的一类 —— 单独成档，按 phase 过滤。
   const visible = log.mode === 'limits'
     ? log.entries.filter((entry) => entry.result !== 'ok')
-    : log.entries;
+    : log.mode === 'vision'
+      ? log.entries.filter((entry) => entry.phase === 'vision')
+      : log.entries;
 
   let body: JSX.Element;
   if (log.status === 'idle') {
@@ -709,8 +685,18 @@ function ErrorLogPanel(props: {
                   onClick={() => props.onToggleRow(rawIndex)}
                 >
                   <span className="sn-mono">{formatClock(entry.ts)}</span>
-                  <span className="sn-diagnosticsCode" data-kind={entry.kind}>
-                    {entry.code !== '' ? entry.code : '—'}
+                  {/*
+                    视觉行特判（2026-11-02）：视觉请求的 code 通常为空（成功）
+                    ⇒ 旧渲染显示「—」，与主对话的成功行无法区分。这里把模式直接
+                    印在 code 列（vision:bridge / vision:tool / vision:chat），
+                    列表上就能看出这一行是视觉调用、且是哪种模式。
+                  */}
+                  <span className="sn-diagnosticsCode" data-kind={entry.kind} data-vision={entry.visionMode ?? ''}>
+                    {entry.code !== ''
+                      ? entry.code
+                      : entry.visionMode !== undefined
+                        ? `vision:${entry.visionMode}`
+                        : '—'}
                   </span>
                   <span className="sn-mono" title={entry.groupIndex !== undefined ? `group ${entry.groupIndex}` : undefined}>
                     {entry.groupIndex !== undefined ? entry.groupIndex : '—'}
@@ -750,6 +736,14 @@ function ErrorLogPanel(props: {
                       {entry.result !== undefined && entry.result !== '' ? (
                         <span>{props.t('diagnosticsResult', { result: entry.result })}</span>
                       ) : null}
+                      {entry.visionMode !== undefined ? (
+                        <span className="sn-diagnosticsVision">
+                          {props.t('diagnosticsVisionMode', {
+                            mode: entry.visionMode,
+                            task: entry.visionTask ?? '',
+                          })}
+                        </span>
+                      ) : null}
                       <span>
                         {entry.rotated
                           ? props.t('diagnosticsRotatedYes')
@@ -760,6 +754,23 @@ function ErrorLogPanel(props: {
                     ) : null}
                     {entry.groupGapMs !== undefined ? (
                       <span>{props.t('diagnosticsGroupGap', { ms: entry.groupGapMs })}</span>
+                    ) : null}
+                    {/*
+                      🔴 2026-11-01：调度诊断标签。与「调度」面板的两个旋钮对照读：
+                      schedWaitMs 恒为 0 = 根本没走到等待分支；schedStep 长期停在 1 =
+                      每次首把就成功（或没走到组内轮换）。
+                    */}
+                    {entry.schedMode !== undefined && entry.schedMode !== '' ? (
+                      <span>{props.t('diagnosticsSchedMode', { mode: entry.schedMode })}</span>
+                    ) : null}
+                    {entry.schedStep !== undefined && entry.schedStep > 0 ? (
+                      <span>{props.t('diagnosticsSchedStep', { n: entry.schedStep })}</span>
+                    ) : null}
+                    {entry.schedRound !== undefined && entry.schedRound > 1 ? (
+                      <span className="sn-diagnosticsWarn">{props.t('diagnosticsSchedRound', { n: entry.schedRound })}</span>
+                    ) : null}
+                    {entry.schedWaitMs !== undefined && entry.schedWaitMs > 0 ? (
+                      <span>{props.t('diagnosticsSchedWait', { ms: entry.schedWaitMs })}</span>
                     ) : null}
                     {entry.providerRetryAfterMs !== undefined ? (
                       <span>{props.t('diagnosticsPra', { ms: entry.providerRetryAfterMs })}</span>
@@ -825,6 +836,14 @@ function ErrorLogPanel(props: {
             onClick={() => props.onSetMode('limits')}
           >
             {props.t('diagnosticsModeLimits')}
+          </button>
+          <button
+            type="button"
+            className={log.mode === 'vision' ? 'sn-segmentedActive' : ''}
+            disabled={busy}
+            onClick={() => props.onSetMode('vision')}
+          >
+            {props.t('diagnosticsModeVision')}
           </button>
           <button
             type="button"
@@ -1094,14 +1113,270 @@ function ModelInfoPanel(props: {
   );
 }
 
+/**
+ * 视觉辅助区块（融合自 dsh-sensenova-vision-aid）。
+ *
+ * 放在「高级选项」之后、「诊断」之前 —— 它是一组配置项，参与 dirty / 保存。
+ * 卡片底部那句提示是这次融合的核心：视觉请求与主对话**共用**同一套 key 池、
+ * 并发闸与组退避，所以不再出现两套轮换抢同一批 key 的情况。
+ */
+/**
+ * 调度策略面板（2026-11-01）。
+ *
+ * 为什么单独成块而不是塞进「高级选项」：这两个数字是**边测边调**的主旋钮，
+ * 需要一眼看到、改完立刻保存，不该藏在二级折叠里。同时下方给出实时推算，
+ * 让「把 groupGapMs 从 20 秒调到 10 秒」的后果（每账户间隔从 60 秒降到 30 秒）
+ * 在改之前就可见，而不是等撞了 429 才知道。
+ */
+function SchedulingPanel(props: {
+  t: TranslateFn;
+  draft: SchedulingDraft;
+  disabled: boolean;
+  accountCount: number;
+  onMode: (mode: string) => void;
+  onGrouping: (grouping: string) => void;
+  onEditField: (field: SchedulingNumberField, text: string) => void;
+  onSmartGroupGap?: (() => void) | undefined;
+}): JSX.Element {
+  const { t, draft, disabled } = props;
+  const fixed = draft.mode === 'fixed';
+  // 推算用值：非法输入按 0 处理，避免 NaN 冒到界面上。
+  const keyGap = Number(draft.keyGapMs);
+  const groupGap = Number(draft.groupGapMs);
+  const keyGapSafe = Number.isFinite(keyGap) && keyGap >= 0 ? keyGap : 0;
+  const groupGapSafe = Number.isFinite(groupGap) && groupGap >= 0 ? groupGap : 0;
+  // 关键换算（与 adapter 的实际节奏一致）：
+  //   一轮 = 一组 4 把，3 次 keyGap + 4 次往返（快拒按 0.2s 估）
+  //   每组占用 = max(本轮耗时, groupGapMs)
+  //   同账户两次使用间隔 ≥ groupGapMs × (组数 − 1)
+  const roundMs = 3 * keyGapSafe + 800;
+  const holdMs = Math.max(roundMs, groupGapSafe);
+  const perAccountMs = groupGapSafe * Math.max(0, props.accountCount - 1);
+  const fmt = (ms: number): string => (ms >= 60_000 ? `${(ms / 60_000).toFixed(1)} 分钟` : `${(ms / 1000).toFixed(1)} 秒`);
+
+  return (
+    <div className="sn-card sn-scheduling">
+      <div className="sn-field">
+        <label className="sn-label" htmlFor="sn-sched-mode">
+          {t('schedMode')}
+        </label>
+        <select
+          id="sn-sched-mode"
+          className="sn-input"
+          value={fixed ? 'fixed' : 'adaptive'}
+          disabled={disabled}
+          onChange={(event: ChangeEventLike) => props.onMode(event.target.value)}
+        >
+          <option value="fixed">{t('schedModeFixed')}</option>
+          <option value="adaptive">{t('schedModeAdaptive')}</option>
+        </select>
+        <p className="sn-hint">{t('schedModeHint')}</p>
+      </div>
+
+      <div className="sn-field">
+        <label className="sn-label" htmlFor="sn-sched-grouping">
+          {t('schedGrouping')}
+        </label>
+        <select
+          id="sn-sched-grouping"
+          className="sn-input"
+          value={draft.grouping === 'by-slot' ? 'by-slot' : 'by-account'}
+          disabled={disabled || !fixed}
+          onChange={(event: ChangeEventLike) => props.onGrouping(event.target.value)}
+        >
+          <option value="by-account">{t('schedGroupingByAccount')}</option>
+          <option value="by-slot">{t('schedGroupingBySlot')}</option>
+        </select>
+        <p className="sn-hint">{t('schedGroupingHint')}</p>
+      </div>
+
+      <div className="sn-models">
+        <div className="sn-field">
+          <label className="sn-label" htmlFor="sn-sched-key-gap">
+            {t('schedKeyGap')}
+          </label>
+          <input
+            id="sn-sched-key-gap"
+            className="sn-input"
+            type="number"
+            min={0}
+            max={60000}
+            step={100}
+            value={draft.keyGapMs}
+            disabled={disabled || !fixed}
+            spellCheck={false}
+            onChange={(event: ChangeEventLike) => props.onEditField('keyGapMs', event.target.value)}
+          />
+          <p className="sn-hint">{t('schedKeyGapHint')}</p>
+        </div>
+        <div className="sn-field">
+          <label className="sn-label" htmlFor="sn-sched-group-gap">
+            {t('schedGroupGap')}
+          </label>
+          <input
+            id="sn-sched-group-gap"
+            className="sn-input"
+            type="number"
+            min={1000}
+            max={600000}
+            step={1000}
+            value={draft.groupGapMs}
+            disabled={disabled || !fixed}
+            spellCheck={false}
+            onChange={(event: ChangeEventLike) => props.onEditField('groupGapMs', event.target.value)}
+          />
+          <p className="sn-hint">{t('schedGroupGapHint')}</p>
+        </div>
+      </div>
+
+      {fixed ? (
+        <>
+          <div className="sn-field">
+            <label className="sn-label" htmlFor="sn-sched-round-budget">
+              {t('schedRoundBudget')}
+            </label>
+            <input
+              id="sn-sched-round-budget"
+              className="sn-input"
+              type="number"
+              min={1}
+              max={10}
+              step={1}
+              value={draft.roundBudget}
+              disabled={disabled}
+              spellCheck={false}
+              onChange={(event: ChangeEventLike) => props.onEditField('roundBudget', event.target.value)}
+            />
+            <p className="sn-hint">{t('schedRoundBudgetHint')}</p>
+          </div>
+          <div className="sn-field">
+            <p className="sn-hint sn-schedEstimate">
+              {t('schedEstimate', {
+                accounts: props.accountCount,
+                round: fmt(roundMs),
+                hold: fmt(holdMs),
+                perAccount: fmt(perAccountMs),
+              })}
+            </p>
+            <p className="sn-hint">{t('schedLogHint')}</p>
+          </div>
+          <button
+            type="button"
+            className="sn-btnGhost sn-kpSmartGap"
+            disabled={disabled || props.onSmartGroupGap === undefined}
+            title={t('schedSmartGapHint')}
+            onClick={() => props.onSmartGroupGap?.()}
+          >
+            {t('schedSmartGap')}
+          </button>
+          <p className="sn-hint sn-schedGapNote">
+            {t('schedSmartGapNote', {
+              accounts: props.accountCount,
+              recommended: fmt(smartGroupGapMs(props.accountCount)),
+              minGap: props.accountCount > 1 ? fmt(minGroupGapMs(props.accountCount)) : '—',
+            })}
+          </p>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function VisionAidPanel(props: {
+  t: TranslateFn;
+  draft: VisionDraft;
+  disabled: boolean;
+  onToggle: (on: boolean) => void;
+  onBridgeMode: (mode: VisionBridgeMode) => void;
+  onEditField: (field: 'modelChain' | 'timeoutMs' | 'bridgePrompt', text: string) => void;
+}): JSX.Element {
+  const { t, draft, disabled } = props;
+  // 关闭总开关时，从属字段一起置灰：不仅逻辑停用，界面也要看得出「整块停了」。
+  const off = disabled || !draft.enabled;
+  return (
+    <div className="sn-card sn-vision" data-enabled={draft.enabled ? '1' : '0'}>
+      <div className="sn-field">
+        <label className="sn-fieldHead" htmlFor="sn-vision-enabled">
+          <span className="sn-label">{t('visionEnabled')}</span>
+          <input
+            id="sn-vision-enabled"
+            className="sn-toggle"
+            type="checkbox"
+            checked={draft.enabled}
+            disabled={disabled}
+            onChange={(event: ToggleEventLike) => props.onToggle(event.target.checked)}
+          />
+        </label>
+        <p className="sn-hint">{draft.enabled ? t('visionEnabledHint') : t('visionDisabledHint')}</p>
+      </div>
+
+      <div className="sn-field">
+        <label className="sn-label" htmlFor="sn-vision-chain">{t('visionModelChain')}</label>
+        <input
+          id="sn-vision-chain"
+          className="sn-input"
+          type="text"
+          value={draft.modelChain}
+          disabled={off}
+          onChange={(event: ChangeEventLike) => props.onEditField('modelChain', event.target.value)}
+        />
+        <p className="sn-hint">{t('visionModelChainHint')}</p>
+      </div>
+
+      <div className="sn-field">
+        <label className="sn-label" htmlFor="sn-vision-timeout">{t('visionTimeout')}</label>
+        <input
+          id="sn-vision-timeout"
+          className="sn-input"
+          type="text"
+          inputMode="numeric"
+          value={draft.timeoutMs}
+          disabled={off}
+          onChange={(event: ChangeEventLike) => props.onEditField('timeoutMs', event.target.value)}
+        />
+        <p className="sn-hint">{t('visionTimeoutHint')}</p>
+      </div>
+
+      <div className="sn-field">
+        <label className="sn-label" htmlFor="sn-vision-bridge">{t('visionBridgeMode')}</label>
+        <select
+          id="sn-vision-bridge"
+          className="sn-input"
+          value={draft.bridgeMode}
+          disabled={off}
+          onChange={(event: ChangeEventLike) => props.onBridgeMode(event.target.value as VisionBridgeMode)}
+        >
+          <option value="on">{t('visionBridgeOn')}</option>
+          <option value="auto">{t('visionBridgeAuto')}</option>
+          <option value="off">{t('visionBridgeOff')}</option>
+        </select>
+        <p className="sn-hint">{t('visionBridgeModeHint')}</p>
+      </div>
+
+      <div className="sn-field">
+        <label className="sn-label" htmlFor="sn-vision-prompt">{t('visionPrompt')}</label>
+        <textarea
+          id="sn-vision-prompt"
+          className="sn-input"
+          rows={4}
+          value={draft.bridgePrompt}
+          disabled={off}
+          onChange={(event: ChangeEventLike) => props.onEditField('bridgePrompt', event.target.value)}
+        />
+        <p className="sn-hint">{t('visionPromptHint')}</p>
+      </div>
+
+      <p className="sn-hint sn-visionNote">{t('visionSharedPoolNote')}</p>
+    </div>
+  );
+}
+
 export function SenseNovaSection(props: SenseNovaSectionProps): JSX.Element {
   const { t } = props;
   const state = props.useSensenovaSettings((s) => s);
   const disabled = !state.writable;
   const savedVisible = useSavedFlash(state.savedCount);
 
-  // 账户列表折叠（v0.2.7）：>8 个默认收起，避免 80 个账户铺满页面。
-  const [accountsCollapsed, setAccountsCollapsed] = useState(true);
 
   // 「清空全部账户」二次确认（3 秒后自动复原，避免误点）。
   const [confirmClear, setConfirmClear] = useState(false);
@@ -1120,17 +1395,70 @@ export function SenseNovaSection(props: SenseNovaSectionProps): JSX.Element {
   };
 
   const accounts = state.accounts;
-  const credentialRefs = credentialReferences(state);
+  // 分组编辑器的数据源：默认密钥属于账户 1（slot −1 排最前），其余按 `N-M` 归并。
+  // 默认密钥槽位**始终存在**（它是账户 1 行的固定首槽）：
+  //   - 已配置/正在编辑 → data-configured=1（实心）；
+  //   - 清除已存密钥（clearStaged）或尚未配置 → 与其他空位一样显示未配置虚线。
+  // 旧条件 `defaultConfigured || draft !== ''` 会在「清除后保存」时让 default 槽从
+  // 行内消失，账户 1 行 key 数与组计划（4×5=20）错位，拖框/演示全部乱套。
+  const poolKeys: PoolKeyRef[] = [
+    {
+      id: 'default',
+      account: 1,
+      slot: -1,
+      label: 'Default',
+      plainLabel: 'Default',
+      labelDraft: 'Default',
+      keyDraft: state.defaultKeyDraft,
+      configured: state.defaultConfigured,
+      writable: state.defaultWritable,
+      clearStaged: state.defaultClearStaged,
+      isDefault: true,
+    },
+    ...accounts.flatMap((account) => {
+      const number = accountNumberOf(account.label);
+      const slot = slotOf(account.label);
+      if (number === undefined || slot === undefined) return [];
+      return [{
+        id: account.id,
+        account: number,
+        slot,
+        label: account.label,
+        plainLabel: account.label,
+        labelDraft: account.labelDraft,
+        keyDraft: account.keyDraft,
+        configured: account.configured,
+        writable: account.writable,
+        clearStaged: account.clearStaged,
+        isDefault: false,
+      }];
+    }),
+  ];
   const savedAccounts = accounts.filter((account) => !account.added);
+  // 实际接入账户数 = 按账户号去重（default 即账户 1）。不是 key 把数：
+  // 每组 4 把只是为了每账户多份凭据，不影响「有多少个账户在轮换」。
+  const accountCount = distinctAccountCount([state.defaultConfigured ? 'Default' : '', ...accounts.map((a) => a.label)]);
+  // 导入或智能分组后给编辑器换 key，强制重建内部选区/菜单状态，修「批量导入后
+  // 方块界面错乱、切会话再回来才好的问题」——与右上角刷新联动。
+  const editorKey = state.savedCount;
 
   return (
     <section className="sn-section" aria-label={t('title')}>
       <div className="sn-titleRow">
         <h2 className="sn-title">{t('title')}</h2>
+        <div className="sn-titleActions">
+          <button type="button" className="sn-btnGhost" disabled={!state.dirty || state.saving} onClick={props.discard}>
+            {t('reset')}
+          </button>
+          <button type="button" className="sn-btnPrimary" disabled={!state.dirty || state.saving} onClick={props.save}>
+            {state.saving ? t('saving') : t('save')}
+          </button>
+        </div>
         <button
           type="button"
           className="sn-btnGhost"
           disabled={state.saving}
+          title={t('refreshTitle')}
           onClick={props.refreshCredentials}
         >
           {t('refresh')}
@@ -1144,35 +1472,6 @@ export function SenseNovaSection(props: SenseNovaSectionProps): JSX.Element {
 
       {/* 凭据与账户 */}
       <SectionHeading text={t('groupCredentials')} />
-
-      {/* Key 池状态（v0.2.7）：当前 key / 下一把 / 池把数 */}
-      <KeyStatusPanel
-        t={t}
-        state={state.keysStatus}
-        onRefresh={props.refreshKeysStatus}
-      />
-      <div className="sn-card">
-        <div className="sn-field">
-          <div className="sn-fieldHead">
-            <span className="sn-label">{t('defaultAccount')}</span>
-            <span className="sn-badges">
-              {state.effectiveActiveAccountId === 'default' ? (
-                <span className="sn-badge sn-badgeActive">{t('activeBadgeEffectiveFull')}</span>
-              ) : null}
-              <StatusBadge configured={state.defaultConfigured} t={t} />
-            </span>
-          </div>
-        </div>
-        <DefaultKeyField
-          t={t}
-          draft={state.defaultKeyDraft}
-          disabled={disabled || !state.defaultWritable}
-          configured={state.defaultConfigured}
-          clearStaged={state.defaultClearStaged}
-          onEdit={props.editDefaultKey}
-          onToggleClear={props.toggleDefaultKeyClear}
-        />
-      </div>
 
       <div className="sn-card">
         <div className="sn-field">
@@ -1196,88 +1495,39 @@ export function SenseNovaSection(props: SenseNovaSectionProps): JSX.Element {
           <p className="sn-hint">{state.quotaRotationDraft ? t('accountsHintQuotaRotation') : t('accountsHint')}</p>
         </div>
 
-        {/* 账户总览条：一目了然显示总数、已配置数、当前生效账户 */}
-        <div className="sn-accountSummary">
-          <span className="sn-accountSummaryStats">
-            {t('accountSummary', { total: state.totalCount, configured: state.configuredCount })}
-          </span>
-          {state.effectiveActiveAccountLabel !== '' ? (
-            <span className="sn-accountSummaryActive">
-              <span className="sn-dotPulse" aria-hidden="true" />
-              {t('accountSummaryActive', { label: state.effectiveActiveAccountLabel })}
-            </span>
-          ) : (
-            <span className="sn-accountSummaryNone">{t('accountSummaryNone')}</span>
-          )}
-        </div>
-
-        {/* 活动账户下拉：自动 + 已保存账户，未保存新增行不参与选择。 */}
-        <div className="sn-field">
-          <label className="sn-label" htmlFor="sn-active-account">
-            {t('activeAccount')}
-          </label>
-          <div className="sn-activeAccountControl">
-            <div className="sn-activeAccountSelect">
-               <select
-              id="sn-active-account"
-              className="sn-input"
-              value={state.activeAccountDraft}
-              disabled={disabled}
-              onChange={(event: ChangeEventLike) => props.setActiveAccount(event.target.value)}
-            >
-              <option value="">
-                {state.effectiveActiveAccountLabel !== ''
-                  ? `${t('activeAccountAuto')} → ${state.effectiveActiveAccountLabel}`
-                  : t('activeAccountAuto')}
-              </option>
-              {savedAccounts.map((account, index) => (
-                <option key={account.id} value={account.id}>
-                  {accountDisplayLabel(account, index, t, credentialRefs)}
-                </option>
-              ))}
-            </select>
-               <span className="sn-selectChevron" aria-hidden="true" />
-             </div>
-            <button
-              type="button"
-              className="sn-reset"
-              disabled={disabled}
-              onClick={() => props.setActiveAccount('')}
-            >
-              {t('activeAccountReset')}
-            </button>
-          </div>
-        </div>
-
-        {accounts.length > 8 ? (
-          <button
-            type="button"
-            className="sn-btnGhost sn-accountsToggle"
-            onClick={() => setAccountsCollapsed((v) => !v)}
-          >
-            {accountsCollapsed ? t('accountsExpand', { n: accounts.length }) : t('accountsCollapse')}
-          </button>
+        {/* 账户与分组（2026-11-02）：key 方块 + 组框，直接编辑 scheduling.groups。
+            默认密钥属于账户 1，所以 `Default` 与 `1-*` 合并成同一行。 */}
+        {state.schedulingDraft.mode === 'fixed' ? (
+          <KeyPoolEditor
+            key={editorKey}
+            t={t}
+            disabled={disabled}
+            keys={poolKeys}
+            plan={state.schedulingDraft.groups ?? []}
+            grouping={state.schedulingDraft.grouping}
+            onHardRefresh={props.refreshCredentials}
+            roundBudget={Number(state.schedulingDraft.roundBudget)}
+            onChange={props.setSchedGroups}
+            onEditLabel={(id, text) => {
+              if (id !== 'default') props.editAccountLabel(id, text);
+            }}
+            onEditKey={(id, text) => {
+              if (id === 'default') props.editDefaultKey(text);
+              else props.editAccountKey(id, text);
+            }}
+            onClearKey={(id) => {
+              if (id === 'default') props.toggleDefaultKeyClear();
+              else props.toggleAccountKeyClear(id);
+            }}
+            onRemoveKey={(id) => {
+              if (id !== 'default') props.removeAccount(id);
+            }}
+            onAddAccount={disabled ? undefined : props.addAccount}
+            onAddKey={disabled ? undefined : props.addAccountKey}
+            onSmartGroup={disabled ? undefined : props.smartGroupAll}
+          />
         ) : null}
-        {!accountsCollapsed || accounts.length <= 8 ? (
-          <div className="sn-accountList">
-            {accounts.map((account, index) => (
-              <AccountRow
-                key={account.id}
-                t={t}
-                account={account}
-                refs={credentialRefs}
-                index={index}
-                disabled={disabled}
-                isActive={state.effectiveActiveAccountId === account.id}
-                isPinned={state.activeAccountDraft === account.id}
-                onRemove={() => props.removeAccount(account.id)}
-                onLabel={(text) => props.editAccountLabel(account.id, text)}
-                onKey={(text) => props.editAccountKey(account.id, text)}
-                onToggleClear={() => props.toggleAccountKeyClear(account.id)}
-              />
-            ))}
-          </div>
-        ) : null}
+
       </div>
 
       {/* 导入 / 导出 Key（v0.2.1）：只读区块，不参与 dirty / 保存流程 */}
@@ -1305,6 +1555,30 @@ export function SenseNovaSection(props: SenseNovaSectionProps): JSX.Element {
         editPool={props.editPool}
       />
 
+      {/* 分组 3a：调度（2026-11-01）—— 固定间隔模式的两个主旋钮，边测边调 */}
+      <SectionHeading text={t('groupScheduling')} />
+      <SchedulingPanel
+        t={t}
+        draft={state.schedulingDraft}
+        disabled={disabled}
+        accountCount={Math.max(accountCount, 1)}
+        onMode={props.setSchedMode}
+        onGrouping={props.setSchedGrouping}
+        onEditField={props.editSched}
+        onSmartGroupGap={disabled ? undefined : props.smartGroupGap}
+      />
+
+      {/* 分组 3b：视觉辅助（融合自 dsh-sensenova-vision-aid）—— 配置项，参与保存 */}
+      <SectionHeading text={t('groupVision')} />
+      <VisionAidPanel
+        t={t}
+        draft={state.visionDraft}
+        disabled={disabled}
+        onToggle={props.setVisionEnabled}
+        onBridgeMode={props.setVisionBridgeMode}
+        onEditField={props.editVisionField}
+      />
+
       {/* 分组 4：诊断 —— 只读的运行数据，与上面的配置项无关（不参与保存/重置） */}
       <SectionHeading text={t('groupDiagnostics')} />
       <ErrorLogPanel
@@ -1326,7 +1600,7 @@ export function SenseNovaSection(props: SenseNovaSectionProps): JSX.Element {
         settingsReady={state.available}
       />
 
-      {/* 保存 / 重置 */}
+      {/* 保存 / 重置（按钮已上移到标题行，这里只保留状态提示）*/}
       <div className="sn-footer">
         <div className="sn-footerStatus">
           {state.failed ? (
@@ -1341,20 +1615,12 @@ export function SenseNovaSection(props: SenseNovaSectionProps): JSX.Element {
             <span className="sn-unsaved">{t('unsaved')}</span>
           ) : null}
         </div>
-        <div className="sn-footerActions">
-          <button type="button" className="sn-btnGhost" disabled={!state.dirty || state.saving} onClick={props.discard}>
-            {t('reset')}
-          </button>
-          <button type="button" className="sn-btnPrimary" disabled={!state.dirty || state.saving} onClick={props.save}>
-            {state.saving ? t('saving') : t('save')}
-          </button>
-        </div>
       </div>
     </section>
   );
 }
 
-function DefaultKeyField(props: {
+export function DefaultKeyField(props: {
   t: TranslateFn;
   draft: string;
   disabled: boolean;
@@ -1394,155 +1660,5 @@ function DefaultKeyField(props: {
       />
       <p className="sn-hint">{t('defaultKeyHint')}</p>
     </div>
-  );
-}
-
-function AccountRow(props: {
-  t: TranslateFn;
-  account: {
-    id: string;
-    ref: string;
-    labelDraft: string;
-    keyDraft: string;
-    configured: boolean;
-    writable: boolean;
-    added: boolean;
-    clearStaged: boolean;
-  };
-  index: number;
-  refs: ReadonlySet<string>;
-  disabled: boolean;
-  isActive: boolean;
-  isPinned: boolean;
-  onRemove: () => void;
-  onLabel: (text: string) => void;
-  onKey: (text: string) => void;
-  onToggleClear: () => void;
-}): JSX.Element {
-  const { t, account } = props;
-  const [visible, setVisible] = useState(false);
-  const displayLabel = accountDisplayLabel(account, props.index, t, props.refs);
-  const labelDraft = isCredentialReference(account.labelDraft, props.refs) ? '' : account.labelDraft;
-  const labelId = `sn-account-label-${account.id}`;
-  const keyId = `sn-account-key-${account.id}`;
-
-  return (
-    <div className="sn-accountRow" data-sn-active={props.isActive ? 'true' : undefined}>
-      <div className="sn-accountHead">
-        <span className="sn-label" title={displayLabel}>{displayLabel}</span>
-        <span className="sn-accountActions">
-          <span className="sn-badges">
-            <StatusBadge configured={account.configured} t={t} />
-            {props.isActive ? (
-              <span className="sn-badge sn-badgeActive">
-                {props.isPinned ? t('activeBadge') : t('activeBadgeEffectiveFull')}
-              </span>
-            ) : null}
-          </span>
-          <button
-            type="button"
-            className="sn-iconBtn"
-            disabled={props.disabled || !account.writable}
-            title={visible ? t('hide') : t('show')}
-            aria-label={visible ? t('hide') : t('show')}
-            onClick={() => setVisible((v) => !v)}
-          >
-            {visible ? <IconEyeOff /> : <IconEye />}
-          </button>
-          {account.configured ? (
-            <button
-              type="button"
-              className="sn-iconBtn"
-              disabled={props.disabled || !account.writable}
-              title={t('clearKey')}
-              aria-label={t('clearKey')}
-              onClick={props.onToggleClear}
-            >
-              <IconEraser />
-            </button>
-          ) : null}
-          <button
-            type="button"
-            className="sn-iconBtn sn-iconBtnDanger"
-            disabled={props.disabled}
-            title={t('accountRemove')}
-            aria-label={t('accountRemove')}
-            onClick={props.onRemove}
-          >
-            <IconTrash />
-          </button>
-        </span>
-      </div>
-      <div className="sn-accountFields">
-        <div className="sn-accountField">
-          <label className="sn-labelSmall" htmlFor={labelId}>
-            {t('accountLabel')}
-          </label>
-          <input
-            id={labelId}
-            className="sn-input"
-            type="text"
-            placeholder={t('accountLabel')}
-            value={labelDraft}
-            disabled={props.disabled}
-            spellCheck={false}
-            onChange={(event: ChangeEventLike) => props.onLabel(event.target.value)}
-          />
-        </div>
-        <div className="sn-accountField">
-          <label className="sn-labelSmall" htmlFor={keyId}>
-            {t('accountKey')}
-          </label>
-          <input
-            id={keyId}
-            className="sn-input"
-            type={visible ? 'text' : 'password'}
-            autoComplete="off"
-            placeholder={t('accountKey')}
-            spellCheck={false}
-            value={account.keyDraft}
-            disabled={props.disabled || !account.writable}
-            onChange={(event: ChangeEventLike) => props.onKey(event.target.value)}
-          />
-          <p className="sn-hint">{t('accountKeyHint')}</p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/** 行内 SVG 图标（currentColor，随主题变色）。 */
-function IconEye(): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
-      <path d="M1.5 8s2.2-3.6 6.5-3.6S14.5 8 14.5 8 12.3 11.6 8 11.6 1.5 8 1.5 8Z" stroke="currentColor" strokeWidth="1.3" />
-      <circle cx="8" cy="8" r="1.8" stroke="currentColor" strokeWidth="1.3" />
-    </svg>
-  );
-}
-
-function IconEyeOff(): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
-      <path d="M1.5 8s2.2-3.6 6.5-3.6c1.5 0 2.8.5 3.8 1.2M14.5 8s-.8 1.3-2.4 2.5M6.6 11.3c.5.1.9.2 1.4.2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-      <path d="M3 13 13 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function IconEraser(): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
-      <path d="M9.5 3.5 13.5 7.5 8 13H4.5L2.5 11c-.6-.6-.6-1.5 0-2.1l4.4-4.4c.6-.6 1.5-.6 2.1 0l.5.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-      <path d="M6 13h8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function IconTrash(): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
-      <path d="M2.5 4h11M6.5 2.5h3M5 4l.5 8.5c0 .6.4 1 1 1h3c.6 0 1-.4 1-1L11 4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
   );
 }

@@ -135,3 +135,33 @@ test('错误消息保留原始 error.code（此前被统一文案丢弃）', asy
     },
   );
 });
+
+// ── 4. 实时闪灯事件（2026-11-03）─────────────────────────────────────────
+test('onKeyEvent：每次真实发包记 start，429 记 rate-limit（红色闪灯的数据源）', async () => {
+  const events: { key: string; kind: string }[] = [];
+  let calls = 0;
+  const adapter = new SensenovaAdapter({
+    options: () => ({ ...CONNECTION, quotaRotation: true }),
+    resolveApiKey: async () => 'key-1',
+    rotateApiKey: async () => 'key-2',
+    onKeyEvent: (event) => events.push(event),
+    fetchImpl: (async (url: string) => {
+      if (String(url).includes('/models')) {
+        return new Response(JSON.stringify({ data: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      calls += 1;
+      if (calls === 1) {
+        return new Response(
+          JSON.stringify({ error: { message: 'inference exceeds tpm/rpm limit', code: 'insufficient_quota' } }),
+          { status: 429, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return sseOk();
+    }) as unknown as typeof fetch,
+  });
+  await drain(adapter);
+  assert.deepEqual(
+    events.map((event) => `${event.key}:${event.kind}`),
+    ['key-1:start', 'key-1:rate-limit', 'key-2:start'],
+  );
+});

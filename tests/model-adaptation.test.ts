@@ -22,8 +22,10 @@ import {
   type SensenovaRequestParams,
 } from '../src/adapter.ts';
 
-const ALL_FIVE = [
+const ALL_MODELS = [
   'sensenova-6.8-flash-lite',
+  // 2026-11-03 新增（DIFF-vs-20261021.md）：SenseNova 6.8 Flash。
+  'sensenova-6.8-flash',
   'deepseek-v4-flash',
   'deepseek-flash',
   'glm-5.2',
@@ -32,14 +34,14 @@ const ALL_FIVE = [
 
 // ── L2 白名单 ───────────────────────────────────────────────────────────────
 
-test('L2: 四个模型的 top_p/惩罚项/seed 默认值会被注入', () => {
+test('L2: 五个模型的 top_p/惩罚项/seed 默认值会被注入', () => {
   const params: SensenovaRequestParams = {
     topP: 0.9,
     frequencyPenalty: 0.5,
     presencePenalty: 0.5,
     seed: 42,
   };
-  for (const model of ['sensenova-6.8-flash-lite', 'deepseek-v4-flash', 'deepseek-flash', 'glm-5.2']) {
+  for (const model of ['sensenova-6.8-flash-lite', 'sensenova-6.8-flash', 'deepseek-v4-flash', 'deepseek-flash', 'glm-5.2']) {
     const body = l2ParamsFor(model, params);
     assert.equal(body.top_p, 0.9, model);
     assert.equal(body.frequency_penalty, 0.5, model);
@@ -70,7 +72,7 @@ test('L2: 表外模型一律不注入（宁可少发，不要因未知能力吃 
 });
 
 test('L2: 未配置任何参数 ⇒ 不产出任何字段', () => {
-  for (const model of ALL_FIVE) {
+  for (const model of ALL_MODELS) {
     assert.deepEqual(l2ParamsFor(model, {}), {});
   }
 });
@@ -101,8 +103,8 @@ test('请求体：L2 参数并入且不覆盖宿主显式字段（reasoning_effo
 
 // ── 静态事实表的一致性护栏 ─────────────────────────────────────────────────
 
-test('视觉白名单：三个视觉模型在列，两个纯文本模型不在列', () => {
-  for (const id of ['sensenova-6.8-flash-lite', 'deepseek-flash', 'kimi-k3']) {
+test('视觉白名单：四个视觉模型在列，两个纯文本模型不在列', () => {
+  for (const id of ['sensenova-6.8-flash-lite', 'sensenova-6.8-flash', 'deepseek-flash', 'kimi-k3']) {
     assert.ok(DOCUMENTED_VISION_MODELS.has(id), id);
   }
   for (const id of ['deepseek-v4-flash', 'glm-5.2']) {
@@ -111,12 +113,13 @@ test('视觉白名单：三个视觉模型在列，两个纯文本模型不在�
   }
 });
 
-test('输出预算表：min(服务端上限, 131072)，5 个模型全覆盖', () => {
+test('输出预算表：min(服务端上限, 131072)，6 个模型全覆盖', () => {
   assert.equal(MODEL_MAX_OUTPUT_OVERRIDES.get('sensenova-6.8-flash-lite'), 65_536);
-  for (const id of ['deepseek-v4-flash', 'deepseek-flash', 'glm-5.2', 'kimi-k3']) {
+  for (const id of ['sensenova-6.8-flash', 'deepseek-v4-flash', 'deepseek-flash', 'glm-5.2', 'kimi-k3']) {
     assert.equal(MODEL_MAX_OUTPUT_OVERRIDES.get(id), 131_072, id);
   }
   assert.equal(MODEL_CONTEXT_OVERRIDES.get('sensenova-6.8-flash-lite'), 262_144, 'lite 上下文不是 1M');
+  assert.equal(MODEL_CONTEXT_OVERRIDES.get('sensenova-6.8-flash'), 1_048_576, '6.8-flash 上下文 1M');
 });
 
 test('不可路由清单包含 403 诱饵 id deepseek-v4.1-flash', () => {

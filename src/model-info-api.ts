@@ -81,6 +81,7 @@ export const MODEL_PARAM_SPECS: readonly ModelParamSpec[] = [
   { key: 'frequency_penalty', label: '频率惩罚', range: '[-2, 2]', serverDefault: '0', hostSupport: 'no', l2: true, note: '🔴【实测】kimi-k3 传非 0 直接 400（"only 0 is allowed"）。思考模式下不生效。' },
   { key: 'presence_penalty', label: '存在惩罚', range: '[-2, 2]', serverDefault: '0', hostSupport: 'no', l2: true, note: '🔴【实测】kimi-k3 传非 0 直接 400。思考模式下不生效。' },
   { key: 'seed', label: '随机种子', range: '[0, 9999999)', serverDefault: '—', hostSupport: 'no', l2: true, note: 'Beta；接受性 5/5 通过（kimi-k3 已整体排除，见模型表）。' },
+  { key: 'repetition_penalty', label: '重复惩罚', range: '[1, 2]', serverDefault: '—', hostSupport: 'no', l2: false, note: '【文档 2026-11-03】6.8-flash 新增参数，尚未实测；宿主 GenerateOptions 无对应字段 ⇒ 不提供 L2 注入。' },
   { key: 'do_sample', label: '是否采样（glm 独有）', range: 'boolean', serverDefault: 'true', hostSupport: 'no', l2: true, note: '仅 glm-5.2。false 时忽略 temperature/top_p，输出更稳定（适合代码/翻译）。' },
   { key: 'response_format', label: '结构化输出', range: '{type: text/json_object}', serverDefault: 'text', hostSupport: 'no', l2: false, note: '【实测】json_object 5/5 可用。⚠️ 未纳入 L2：对 DSH 的 agent 对话没有意义，且是 v4「三方组合 400」的参与者。lite 的 JSON 输出会包在 ```json 围栏里。' },
   { key: 'n', label: '生成候选数', range: '[1, 5]', serverDefault: '1', hostSupport: 'no', l2: false, note: '🔴【实测】v4/v4.1/kimi 上 n>1 被**静默降到 1**，只在 lite 真生效；且是 v4「三方组合 400」的参与者。⇒ 不提供。' },
@@ -132,6 +133,14 @@ const NOTES_V41 = [
   '【实测】`deepseek-v4.1-flash` 是 403 诱饵 id，唯一可调的是本 id。',
 ];
 
+
+const NOTES_68 = [
+  '【文档】新一代多模态智能体模型：1M 上下文 / 128K 输出上限 / 支持工具调用与浏览器操作（2026-11-03）。',
+  '【文档】思考模式默认开启且**不可关闭** ⇒ 推理档位没有 `none`（minimal/low/medium/high/xhigh/max）。',
+  '【文档】temperature 范围是 [0,1]（不是 [0,2]）；新增 `repetition_penalty`（[1,2]，尚未实测）。',
+  '【文档】日常任务推荐 6.8-flash-lite；复杂长链路/专业交付推荐本模型。',
+];
+
 const NOTES_GLM = [
   '【实测】无视觉能力但**诚实拒答**（明确说"我无法直接看到图片"），不产生幻觉 ⇒ 比 v4-flash 安全。',
   '🔴【实测】`thinking` 参数**硬拒**（400）：必须用 `reasoning_effort`，本插件永不发送 thinking。',
@@ -160,6 +169,17 @@ export const MODEL_FACT_SHEETS: readonly ModelFactSheet[] = [
     efforts: [...(MODEL_L2_PARAM_SUPPORT.get('sensenova-6.8-flash-lite') ?? [])].length > 0 ? ['none', 'low', 'medium', 'high', 'xhigh'] : [],
     blockedL2Params: [],
     notes: NOTES_LITE,
+  },
+  {
+    id: 'sensenova-6.8-flash',
+    displayName: 'SenseNova 6.8 Flash',
+    contextWindow: MODEL_CONTEXT_OVERRIDES.get('sensenova-6.8-flash') ?? 1_048_576,
+    maxOutputTokens: MODEL_MAX_OUTPUT_OVERRIDES.get('sensenova-6.8-flash') ?? 131_072,
+    vision: true,
+    visionNote: '文档：图像输入（公网 URL / Base64）—— 与 6.8-flash-lite 同系列多模态。',
+    efforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    blockedL2Params: [],
+    notes: NOTES_68,
   },
   {
     id: 'deepseek-v4-flash',

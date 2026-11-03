@@ -8,7 +8,7 @@ dsh-sensenova-freeapi 是一个非官方的 **DeepSeek Harness**（DSH）LLM 提
   <img src="./docs/lockup.png" alt="DeepSeek Harness × SenseNova" width="720">
 </p>
 
-![release](https://img.shields.io/badge/status-0.2.8-3fb950)
+![release](https://img.shields.io/badge/status-0.5.0-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 > ⚠️ **如果插件安装出现问题**：用**无插件模式**进入 DSH，然后用**大肥鱼**修一下，最多 **0.5 元**可以搞定。
@@ -31,13 +31,13 @@ https://github.com/modesthub/dsh-sensenova-freeapi
 ```
 
 3. 确认安装，然后**重启 DSH** 使插件生效
-4. 安装后可在**插件详情页**看到当前版本号（本 README 对应 **v0.2.7**）
+4. 安装后可在**插件详情页**看到当前版本号（本 README 对应 **v0.5.0**）
 
 ### 更新到最新版
 
 - 在插件安装界面**重新输入同一个地址**（或先卸载再安装）即可拉取最新代码
 - 更新后**重启 DSH**，插件详情页的版本号会随之变化 —— 这是确认是否更新成功最直接的方式
-- 想固定到某个版本，可在地址后追加 tag，例如 `https://github.com/modesthub/dsh-sensenova-freeapi#v0.2.7`
+- 想固定到某个版本，可在地址后追加 tag，例如 `https://github.com/modesthub/dsh-sensenova-freeapi#v0.5.0`
 
 ### 命令行安装（备选）
 

@@ -62,11 +62,25 @@ import {
 import {
   GroupGapController,
   SensenovaGroupPool,
+  groupGateKey,
   normalizeGroupScheduling,
+  planGroups,
   type GroupSchedulingConfig,
+  type SeedGroup,
 } from './group-pool.ts';
+// 视觉辅助（融合自 dsh-sensenova-vision-aid）：配置、池感知请求、工具、读图桥。
+import {
+  VisionFieldsSchema,
+  resolveVisionOptions,
+  type ResolvedVisionOptions,
+  type VisionConfig,
+} from './vision/config.ts';
+import { runVisionChain, type VisionRuntime } from './vision/request.ts';
+import { describeImageTool, describeImagesTool, visionChatTool } from './vision/tools.ts';
+import { installVisionBridge } from './vision/bridge.ts';
 import { ERROR_LOG_ROUTE, handleErrorLogHttp } from './error-log-api.ts';
 import { KEYS_STATUS_ROUTE, handleKeysStatusHttp } from './keys-status-api.ts';
+import { KEY_EVENTS_ROUTE, KeyEventBuffer, handleKeyEventsHttp } from './key-events-api.ts';
 import { KEYS_EXPORT_ROUTE, handleKeysExportHttp } from './keys-api.ts';
 import {
   MODEL_INFO_ROUTE,
@@ -172,6 +186,14 @@ export interface SensenovaConfig {
    * 账户 label 不符合「账户-序号」约定时（无法划分组）同样自动回落。
    */
   scheduling?: GroupSchedulingConfig;
+  /**
+   * 视觉辅助（融合自 dsh-sensenova-vision-aid）。
+   *
+   * 开启后：三个工具（describe_image / describe_images / chat）可用，且纯文本
+   * 主模型拖图会被自动转成视觉观察文本。所有视觉请求与主对话**共用**同一套
+   * key 池、并发闸、组退避与运行日志 —— 这正是「视觉不再另起一套轮换」的落点。
+   */
+  vision?: VisionConfig;
 }
 
 /**
@@ -258,7 +280,7 @@ const ConfigSchema = z.object({
   // 本插件支持的最大账户槽位数（多出的 key 被忽略并 warn 一次）。
   poolPolicy: z.object({
     kickThreshold: z.natural().min(1).max(10).default(DEFAULT_KEY_POOL_PARAMS.kickThreshold),
-    probeInitialMs: z.natural().min(1_000).max(300_000).default(DEFAULT_KEY_POOL_PARAMS.probeInitialMs),
+    probeInitialMs: z.natural().min(1_000).max(600_000).default(DEFAULT_KEY_POOL_PARAMS.probeInitialMs),
     probeBackoffFactor: z.number().min(1).max(10).default(DEFAULT_KEY_POOL_PARAMS.probeBackoffFactor),
     probeMaxMs: z.natural().min(1_000).max(600_000).default(DEFAULT_KEY_POOL_PARAMS.probeMaxMs),
     capacity: z.natural().min(1).max(100).default(DEFAULT_KEY_POOL_PARAMS.capacity),
@@ -299,7 +321,34 @@ const ConfigSchema = z.object({
     groupGapRecoverFactor: z.number().min(0.5).max(0.999).default(0.95),
     recoverWindowMs: z.natural().min(1_000).max(120_000).default(8_000),
     failFastMs: z.natural().min(100).max(120_000).default(8_000),
+    // 2026-11-01 固定间隔调度（mode='fixed' 时生效）：
+    // 组内 key 间定时 + 组间定时。两者都可在线调，用于收敛「每账户被使用的间隔」。
+    mode: z.union(['adaptive', 'fixed'] as const).default('fixed'),
+    groupGapMs: z.natural().min(1_000).max(600_000).default(20_000),
+    keyGapMs: z.natural().min(0).max(60_000).default(1_000),
+    // 429 轮次预算（2026-11-03）：多少轮完整遍历仍全败 ⇒ 抛宿主。默认 2。
+    roundBudget: z.natural().min(1).max(10).default(2),
+    // 分组形状（2026-11-02）：'by-account' = 一组一个账户；'by-slot' = 组 i 是每个账户第 i 把。
+    grouping: z.union(['by-account', 'by-slot'] as const).default('by-account'),
+    // 每账户的组切分（2026-11-02）：空数组 = 每账户一组（旧行为）。
+    // 例：{ account: 1, sizes: [4, 4] } ⇒ 账户 1 的前 4 把是第 1 组、后 4 把是第 2 组。
+    // 未列出的账户回落上面的缺省形状；计划外多出来的 key 并入该账户最后一组（绝不丢 key）。
+    groups: z.array(z.object({
+      account: z.natural().min(1).max(9_999),
+      sizes: z.array(z.natural().min(1).max(20)).min(1).max(20),
+      // 空档数（孤立 key）：长度 = sizes.length + 1，gaps[i] 在第 i 组之前。
+      gaps: z.array(z.natural().min(0).max(20)).max(21).default([]),
+    })).default([]),
   }).volatile(),
+  // 视觉辅助（融合自 dsh-sensenova-vision-aid）。
+  //
+  // 为什么作为子段而不是独立命名空间：宿主的 namespace 就是 profile 条目 id
+  // （settings/src/index.ts:315），一个插件条目只能有一个 ns；让本插件占两个条目
+  // 会二次 apply ⇒ registerAdapter 抛 DUPLICATE_ADAPTER。所以视觉配置挂在这里，
+  // 控制台里仍以独立区块呈现。
+  //
+  // `.volatile()` 打在**外层对象**上（与 retryPolicy / poolPolicy / scheduling 同范式）。
+  vision: VisionFieldsSchema,
 });
 
 /**
@@ -432,6 +481,8 @@ export interface ResolvedSensenovaOptions {
   requestParams: SensenovaRequestParams;
   /** 已归一化的组调度配置（v0.5 P1；enabled=false 时组池不启用）。 */
   scheduling: GroupSchedulingConfig;
+  /** 已归一化的视觉辅助配置（融合自 vision-aid，永不为 undefined）。 */
+  vision: ResolvedVisionOptions;
   modelSelection?: ModelSelection;
 }
 
@@ -465,7 +516,7 @@ function clampInt(value: unknown, min: number, max: number, fallback: number): n
  */
 export function normalizePoolPolicy(value: unknown): KeyPoolParams {
   const raw = (typeof value === 'object' && value !== null ? value : {}) as Partial<KeyPoolParams>;
-  const probeInitialMs = clampInt(raw.probeInitialMs, 1_000, 300_000, DEFAULT_KEY_POOL_PARAMS.probeInitialMs);
+  const probeInitialMs = clampInt(raw.probeInitialMs, 1_000, 600_000, DEFAULT_KEY_POOL_PARAMS.probeInitialMs);
   const backoff = typeof raw.probeBackoffFactor === 'number' && Number.isFinite(raw.probeBackoffFactor)
     ? raw.probeBackoffFactor
     : DEFAULT_KEY_POOL_PARAMS.probeBackoffFactor;
@@ -617,34 +668,97 @@ export function resolveAdapterOptions(config: SensenovaConfig): ResolvedSensenov
     poolPolicy: normalizePoolPolicy(config.poolPolicy),
     // 组调度（v0.5 P1）：逐字段回落缺省；enabled 缺省 true。
     scheduling: normalizeGroupScheduling(config.scheduling),
+    // 视觉辅助（融合自 vision-aid）：逐字段回落缺省；enabled 缺省 true。
+    vision: resolveVisionOptions(config.vision),
     // L2 连接级请求参数默认值（2026-09-23）。未配置时为空对象 ⇒ 不注入任何字段。
     requestParams: normalizeRequestParams(config.requestParams),
     ...(modelSelection !== undefined ? { modelSelection } : {}),
   };
 }
 
-export function apply(ctx: Context, config: SensenovaConfig): void {
-  // 🔴 2026-09-24：`.volatile()` 让配置字段在运行期变成 `{get}` 引用，必须先解包。
+/**
+ * 上一次 apply 的调度参数快照（**模块级**，跨 apply 持久，2026-11-02）。
+ *
+ * 为什么放模块级而不是 apply 闭包：设置页保存 ⇒ patch 变更 ⇒ **重新 apply 本插件**
+ * ——闭包变量随旧 apply 一起销毁，两次 apply 之间没有共享状态。模块是 ESM 单例，
+ * 它是唯一能回答「这次 apply 和上次比，调度参数变了吗」的地方。
+ * undefined = 本进程首次 apply（宿主启动/插件首装），不算「改动」，不写日志。
+ */
+let lastSchedulingSnapshot: { grouping: string; keyGapMs: number; groupGapMs: number; plan: string } | undefined;
+/** 分组计划的可读摘要：`1:[4,4] 3:[2,2,2]`（改计划时留痕用）。 */
+const formatGroupPlan = (groups: readonly { account: number; sizes: readonly number[] }[] | undefined): string =>
+  (groups ?? []).map((entry) => `${entry.account}:[${entry.sizes.join(',')}]`).join(' ') || '缺省（每账户一组）';
+
+export function apply(ctx: Context, config: SensenovaConfig): void {  // 🔴 2026-09-24：`.volatile()` 让配置字段在运行期变成 `{get}` 引用，必须先解包。
   //
-  // 为什么可以**只在 apply 入口解包一次**：0.1.7 的配置生效机制是
-  // 「patch 变更 ⇒ app-boot 重组 ⇒ 本入口被重新 apply」（见下方路由注册处注释），
-  // 所以每次 apply 解包拿到的都是当时最新的值，不会读出陈旧值。
-  // 解包后对象身份稳定 ⇒ 下方 `options()` 的 memo（`raw === lastRaw`）照常命中，
-  // 与改造前语义完全一致（改造前 `config` 也是同一个对象）。
-  const resolvedConfig = plainConfig(config);
-  // 0.1.7：`current` 不再由设置服务回灌 —— 配置变更会**重新 apply 本插件**（见下方
-  // 路由注册处的说明），所以本次 apply 拿到的 `config` 就是唯一且最新的配置来源。
-  const current = () => resolvedConfig;
-  let lastRaw: SensenovaConfig | undefined;
+  // 🔴 2026-11-02 修正（实测：保存不生效）：**必须每次读时重新解包 volatile**。
+  //
+  // 现场：设置页把 keyGapMs 保存成 500（patch 已写 500，时间 12:43:37），随后 12:44
+  // 的 22 分钟测试里 275 条日志全是 `schedKeyGapMs: 1000`、实测等待中位 0.96s ——
+  // 运行中的插件根本没换值。
+  // 原因：`.volatile()` 字段在 apply 收到的 config 里是 `{get}` 引用，官方
+  // `agent-default-model` 是每次都 `this.config.provider.get()` 实时读；本插件原来
+  // 只在 apply 入口 `plainConfig()` 解包一次，之后 options() 永远返回同一份快照，
+  // volatile 的「保存即生效」语义被丢掉。
+  // 现在：每次 options() 重新解包。指纹比较保证只有值真的变了才重建
+  // ResolvedSensenovaOptions（正常请求路径下指纹相同，开销是一次 JSON.stringify
+  // 几个 volatile 字段）。
+  //
+  // 非 volatile 字段（accounts / apiBase / concurrency …）的变更仍走「patch 变更 ⇒
+  // 重新 apply」那条路：那时 config 闭包就是新的，解包自然拿到新值。
+  const volatileFingerprint = (cfg: SensenovaConfig): string =>
+    JSON.stringify([
+      cfg.scheduling,
+      cfg.poolPolicy,
+      cfg.retryPolicy,
+      cfg.errorLog,
+      cfg.quotaRotation,
+      cfg.vision,
+      cfg.modelSelection,
+      cfg.requestParams,
+    ]);
+  let lastFingerprint: string | undefined;
   let lastGood: ResolvedSensenovaOptions | undefined;
+  // 调度参数变更留痕的延迟绑定：options() 在本函数前段就被调用（预热），而 errorLog
+  // 实例在后面才创建。检测到变化时先存描述，errorLog 就绪后补写（见 errorLog 创建处）。
+  let schedNotice: string | undefined;
+  let schedNoticeSink: ((message: string, sched: ResolvedSensenovaOptions['scheduling']) => void) | undefined;
 
   const options = (): ResolvedSensenovaOptions => {
-    const raw = current();
-    if (raw === lastRaw && lastGood !== undefined) return lastGood;
-    const next = resolveAdapterOptions(raw);
-    lastRaw = raw;
-    lastGood = next;
-    return next;
+    const raw = plainConfig(config);
+    const fp = volatileFingerprint(raw);
+    if (fp === lastFingerprint && lastGood !== undefined) return lastGood;
+    lastFingerprint = fp;
+    lastGood = resolveAdapterOptions(raw);
+    // 🔴 2026-11-02：调度参数变更留痕。放在这里而不是 apply 入口，因为 volatile
+    // 保存**不会**重新 apply（实测：keyGapMs 500 保存后运行值仍是 1000）——
+    // 只有「每次读时比较」才抓得到这次变化。
+    const sched = lastGood.scheduling;
+    const snap = {
+      grouping: sched.grouping ?? 'by-account',
+      keyGapMs: sched.keyGapMs ?? 1_000,
+      groupGapMs: sched.groupGapMs ?? 20_000,
+      plan: formatGroupPlan((sched as { groups?: { account: number; sizes: number[] }[] }).groups),
+    };
+    const prev = lastSchedulingSnapshot;
+    lastSchedulingSnapshot = snap;
+    if (
+      prev !== undefined &&
+      (prev.grouping !== snap.grouping
+        || prev.keyGapMs !== snap.keyGapMs
+        || prev.groupGapMs !== snap.groupGapMs
+        || prev.plan !== snap.plan)
+    ) {
+      const diffs: string[] = [];
+      if (prev.grouping !== snap.grouping) diffs.push(`分组形状 ${prev.grouping} → ${snap.grouping}`);
+      if (prev.keyGapMs !== snap.keyGapMs) diffs.push(`组内 key 间隔 ${prev.keyGapMs} → ${snap.keyGapMs}ms`);
+      if (prev.groupGapMs !== snap.groupGapMs) diffs.push(`组间定时 ${prev.groupGapMs} → ${snap.groupGapMs}ms`);
+      if (prev.plan !== snap.plan) diffs.push(`分组计划 ${prev.plan} → ${snap.plan}`);
+      const message = `调度参数已保存并生效：${diffs.join('；')}`;
+      if (schedNoticeSink !== undefined) schedNoticeSink(message, sched);
+      else schedNotice = message;
+    }
+    return lastGood;
   };
   options();
 
@@ -704,34 +818,77 @@ export function apply(ctx: Context, config: SensenovaConfig): void {
   const groupPool = new SensenovaGroupPool({ config: groupScheduling });
   const groupGap = new GroupGapController({ config: groupScheduling });
   /**
-   * 把已解析账户切成「单位请求组」：组索引 = label 的序号（slot），组内按账户号升序。
+   * 把已解析账户切成「单位请求组」：**一组 = 一个账户的全部 key**（2026-11-02 改）。
    *
-   * label 约定 `账户-序号`（如 `1-0`：账户 1 的第 0 把 key）⇒ 组 i = 每个账户的第 i 把，
-   * 正好是方案里的「每组恰 A 把、每账户 1 把」。任一 label 不可解析即放弃建组
-   * （回落到 per-key 池；自定义命名的账户无法安全分组）。
+   * label 约定 `账户-序号`（如 `1-0`：账户 1 的第 0 把 key，`Default` 即账户 1 第 0 把）。
+   * 组按账户号升序排，组内按序号（slot）升序 —— 正是「同账户 4 把一组，组内
+   * 1→2→3→4 顺序轮换」的固定间隔调度（fixed）所要求的形状。
+   *
+   * 🔴 11-02 之前的行为：组 i = 每个账户的第 i 把（每账户 1 把/组）。那是 v0.5 P1
+   * 「账户级限流、交替摊薄」时代的形状；改成按账户分组后，同一账户的 4 把在同组内
+   * 顺序试，账户之间的间隔由组间定时（groupGapMs）保证。
+   *
+   * 任一 label 不可解析即放弃建组（回落到 per-key 池；自定义命名的账户无法安全分组）。
    *
    * @returns 建成的组数（0 = 未启用组调度或缺省回落）。
    */
   const seedGroups = (accounts: readonly ResolvedAccount[]): number => {
     if (!options().scheduling.enabled) return 0;
-    const bySlot = new Map<number, { account: number; key: string }[]>();
+    const byAccount = new Map<number, { slot: number; key: string }[]>();
     for (const account of accounts) {
       const order = accountRotationKey(account.slot.label);
       if (order === undefined) return 0;
-      const entries = bySlot.get(order.slot) ?? [];
-      entries.push({ account: order.account, key: account.key });
-      bySlot.set(order.slot, entries);
+      const entries = byAccount.get(order.account) ?? [];
+      entries.push({ slot: order.slot, key: account.key });
+      byAccount.set(order.account, entries);
     }
-    if (bySlot.size === 0) return 0;
-    const groups: string[][] = [];
+    if (byAccount.size === 0) return 0;
+
+    const scheduling = options().scheduling;
+    // 每账户的组切分计划：account → sizes（未列出的账户回落缺省形状）。
+    const plan = new Map<number, { sizes: number[]; gaps: number[] }>();
+    // 分组计划是 GroupSchedulingConfig 的正式字段（2026-11-03 修复：normalize 曾把它
+    // 丢掉，导致设置页的分组不生效、每个账户退化成「整账户一组」）。
+    const planList = scheduling.groups ?? [];
+    for (const entry of planList) {
+      if (typeof entry.account === 'number' && Array.isArray(entry.sizes) && entry.sizes.length > 0) {
+        plan.set(entry.account, {
+          sizes: entry.sizes.filter((n: number) => typeof n === 'number' && n > 0),
+          gaps: Array.isArray(entry.gaps) ? entry.gaps.filter((n: number) => typeof n === 'number' && n >= 0) : [],
+        });
+      }
+    }
+    const bySlot = scheduling.grouping === 'by-slot';
+
+    const seeds: SeedGroup[] = [];
     const accountOf = new Map<string, string>();
-    for (const slot of [...bySlot.keys()].sort((a, b) => a - b)) {
-      const entries = (bySlot.get(slot) ?? []).sort((a, b) => a.account - b.account);
-      groups.push(entries.map(entry => entry.key));
-      for (const entry of entries) accountOf.set(entry.key, `account-${entry.account}`);
+    let orphanTotal = 0;   // 计划里的空档：这些 key 不进池、不参与轮换
+    const accounts2 = [...byAccount.keys()].sort((a, b) => a - b);
+    for (const acct of accounts2) {
+      const entries = (byAccount.get(acct) ?? []).sort((a, b) => a.slot - b.slot);
+      // 缺省形状：by-slot = 每把自成一组；by-account = 全部 key 一组。
+      const planned = plan.get(acct);
+      const sizes = planned !== undefined && planned.sizes.length > 0
+        ? planned.sizes
+        : (bySlot ? entries.map(() => 1) : [entries.length]);
+      const gaps = planned?.gaps ?? [];
+      const accountId = `account-${acct}`;
+      const { groups: local, orphans } = planGroups(entries.map((entry) => entry.key), sizes, gaps);
+      if (orphans > 0) orphanTotal += orphans;
+      local.forEach((keys, ordinal) => {
+        seeds.push({ keys, account: accountId, ordinal });
+        for (const key of keys) accountOf.set(key, accountId);
+      });
     }
-    groupPool.seed(groups, (key) => accountOf.get(key));
-    return groups.length;
+    if (orphanTotal > 0) {
+      ctx.logger.warn(
+        'llm-sensenova: 分组计划里有 %d 把 key 处于空档（不参与轮换）—— 在设置页把它们拖进某个组即可恢复。',
+        orphanTotal,
+      );
+    }
+    if (seeds.length === 0) return 0;
+    groupPool.seed(seeds, (key) => accountOf.get(key));
+    return seeds.length;
   };
   /** 当前被 tpm 踢出/探测中的 key（组池选 key 时要排除，避免把阻塞态 key 重新选出来）。 */
   const blockedKeySet = (): ReadonlySet<string> => new Set(keyPool.snapshot().blocked.map(entry => entry.key));
@@ -743,8 +900,53 @@ export function apply(ctx: Context, config: SensenovaConfig): void {
     keyIndex.set(key, { label: slot.label, ref: slot.ref });
   };
 
+  /**
+   * 实时 key 事件出口（2026-11-03）：adapter / 视觉链每次实际用某把 key 发请求或
+   * 撞 429 时调用，写入环形缓冲供设置页轮询闪灯（绿=在发、红=429）。
+   *
+   * 只存 label / credential-ref 两个可读名，**绝不存 key 原文**；未登记的 key
+   * （极端装配/测试）直接丢弃，避免把事件错标到别的格子。
+   */
+  const keyEvents = new KeyEventBuffer();
+  const emitKeyEvent = (key: string, kind: 'start' | 'rate-limit'): void => {
+    const described = keyIndex.get(key);
+    if (described === undefined) return;
+    keyEvents.record({ kind, label: described.label, ref: described.ref });
+  };
+
   // W4：限流事件记录器（构造零副作用；首次写入时才创建 $DSH_HOME/logs）。
   const errorLog = new SenseNovaErrorLog();
+
+  // 🔴 2026-11-02：调度参数变更留痕的**写入端**。检测在 options() 里（volatile 保存
+  // 不重新 apply，只能在每次读配置时比较），这里只负责绑定 sink 并补写早于本行
+  // 发生的变更（options() 预热时可能已经检测到）。
+  schedNoticeSink = (message, sched) => {
+    if (!options().errorLog) return;
+    errorLog.record({
+      ts: new Date().toISOString(),
+      model: '',
+      status: 0,
+      code: 'config_changed',
+      kind: '',
+      quota: false,
+      message,
+      phase: 'config',
+      result: 'ok',
+      latencyMs: 0,
+      schedMode: sched.mode,
+      schedKeyGapMs: sched.keyGapMs,
+      schedGroupGapMs: sched.groupGapMs,
+      rotated: false,
+      attempt: 0,
+      account: '',
+      session: '',
+    });
+  };
+  if (schedNotice !== undefined) {
+    const pending = schedNotice;
+    schedNotice = undefined;
+    schedNoticeSink(pending, options().scheduling);
+  }
 
   const resolveApiKey = async (
     connection: { apiBase: string; accountCount: number },
@@ -882,6 +1084,9 @@ export function apply(ctx: Context, config: SensenovaConfig): void {
     reportSuccess: (key) => keyPool.onSuccess(key),
     // 限流事件的两个可读展示字段（`accountLabel` / `accountRef`）由此反查。
     describeKey: (key) => keyIndex.get(key),
+    // 实时闪灯（2026-11-03）：每次真实发包/429 写一条事件，设置页 key 网格轮询后
+    // 按实际节奏闪绿/红。
+    onKeyEvent: (event) => emitKeyEvent(event.key, event.kind),
     // 视觉模型（kimi-k3、sensenova-6.8-flash-lite 等）需要把宿主持久化图片解析成
     // 请求字节：走附件服务的 readImageRequest（按其 0.1.6 契约的 ImageRequestTarget
     // 请求目标尺寸版本）；附件服务不可用时返回 undefined，adapter 会跳过该图并照常
@@ -903,6 +1108,100 @@ export function apply(ctx: Context, config: SensenovaConfig): void {
     // 不注入 ⇒ adapter 完全走 P0 的 per-key 路径（行为不变）。
     groupPool: () => (options().scheduling.enabled ? groupPool : undefined),
     groupGap: () => (options().scheduling.enabled ? groupGap : undefined),
+  });
+
+  // ── 视觉辅助（融合自 dsh-sensenova-vision-aid）──────────────────────────────
+  //
+  // 🔴 融合的核心不是搬代码，而是**换 key 的来源**：旧版在视觉插件里自己
+  // `resolveApiKey(ctx, keyRef)` 取唯一一把 key，既不进池也不占闸，于是视觉与
+  // 主请求各跑各的轮换、却抢同一批账户配额 —— 这就是「复用 apikey 特别容易撞
+  // 429」的根因。这里的 runtime 把主对话在用的同一套能力交出去：
+  //   resolveApiKey（组轮换）/ gate（组键并发闸）/ reportRateLimit（key 池 +
+  //   组池 + AIMD）/ reportSuccess / errorLog。
+  const visionRuntime = (): VisionRuntime => ({
+    apiBase: () => options().apiBase,
+    concurrency: () => options().concurrency,
+    queueTimeoutMs: () => options().queueTimeoutMs,
+    quotaRotation: () => options().quotaRotation,
+    accountCount: () => options().accounts.length,
+    resolveApiKey: () => resolveApiKey({
+      apiBase: options().apiBase,
+      accountCount: options().accounts.length,
+    }),
+    rotateApiKey: (rejected, rejection, exclude) => rotateApiKey(rejected, rejection, exclude),
+    gate: () => gate,
+    gateKeyOf: (key) => {
+      const scheduling = options().scheduling;
+      const info = scheduling.enabled ? groupPool.watchKey(key) : undefined;
+      if (info === undefined) return { key, limit: options().concurrency };
+      // 组容量 = 组内 key 数（账户数）；与 concurrency 取大者，保持单账户老配置不被串行。
+      return {
+        key: groupGateKey(info.groupIndex),
+        limit: Math.max(info.capacity, options().concurrency),
+        groupIndex: info.groupIndex,
+      };
+    },
+    reportRateLimit: (key, kind) => {
+      const poolState = (): { running: number; blocked: number } => {
+        const snapshot = keyPool.snapshot();
+        return { running: snapshot.running.length, blocked: snapshot.blocked.length };
+      };
+      // key 池只对 tpm 计 strikes —— rpm/rate 是秒级桶，踢掉只会白丢该 key 的 prompt cache。
+      const kicked = kind === 'tpm' ? keyPool.recordTpmStrike(key).kicked : false;
+      // 组池对**任何** 429 都退避（整组 + 账户级联动），并推高 AIMD 组间隙。
+      if (options().scheduling.enabled) {
+        groupPool.reportRateLimit({ key, kind });
+        groupGap.recordHit();
+      }
+      return { kicked, ...poolState() };
+    },
+    reportSuccess: (key) => {
+      keyPool.onSuccess(key);
+      if (options().scheduling.enabled) {
+        groupPool.onSuccess(key);
+        groupGap.recordSuccess();
+      }
+    },
+    groupGapMs: () => (options().scheduling.enabled ? groupGap.gapMs() : undefined),
+    groupOf: (key) => (options().scheduling.enabled ? groupPool.watchKey(key)?.groupIndex : undefined),
+    describeKey: (key) => keyIndex.get(key),
+    // 视觉请求也点亮它实际使用的那把 key（与主对话共用同一批 key）。
+    onKeyEvent: (key, kind) => emitKeyEvent(key, kind),
+    record: (event) => {
+      if (options().errorLog) errorLog.record(event);
+    },
+  });
+
+  const visionDeps = {
+    runtime: visionRuntime,
+    options: (): ResolvedVisionOptions => options().vision,
+  };
+
+  // 三个工具（可选注入 tools：非 agent profile 可能没有 ⇒ 跳过注册，其余照常）。
+  //
+  // 2026-11-03：这里**不按 enabled 条件注册**。原因是 volatile 字段保存不触发
+  // 重新 apply（见 options() 上方 2026-11-02 的实测注释）——一旦在 apply 时按
+  // 开关值跳过注册，运行期切开关既不会注销、也（重启后）不会补注册。工具保持
+  // 常驻，由工具体里的 `options.enabled` 守卫在调用时直接返回「已关闭」。
+  ctx.inject(['tools'], (toolsCtx) => {
+    toolsCtx.effect(() => {
+      const disposers = [
+        toolsCtx.tools.register(describeImageTool(visionDeps)),
+        toolsCtx.tools.register(describeImagesTool(visionDeps)),
+        toolsCtx.tools.register(visionChatTool(visionDeps)),
+      ];
+      return () => {
+        for (const dispose of disposers) void dispose();
+      };
+    }, 'llm-sensenova: vision tools');
+  });
+
+  // 全局静默读图桥（可选注入 llm）：纯文本主模型拖图时自动转成视觉观察文本。
+  ctx.inject(['llm'], (llmCtx) => {
+    llmCtx.effect(
+      () => installVisionBridge({ ctx: llmCtx, runtime: visionRuntime, options: () => options().vision }),
+      'llm-sensenova: vision bridge',
+    );
   });
 
   ctx.llm.registerConfigurableProviders([{
@@ -1029,6 +1328,21 @@ export function apply(ctx: Context, config: SensenovaConfig): void {
         }),
       }),
       `llm-sensenova: keys status route ${KEYS_STATUS_ROUTE}`,
+    );
+  });
+
+  // 实时 key 请求事件（2026-11-03）：设置页 key 网格「按真实节奏闪灯」的数据源。
+  // 与 keysStatus 同范式：可选注入 connection、同源鉴权、绝不抛、只回可读名。
+  // 客户端每 300ms 带 since 轮询一次，取回自上次游标之后的事件。
+  ctx.inject(['connection'], (connectionCtx) => {
+    connectionCtx.effect(
+      () => connectionCtx.connection.fetch.register({
+        path: KEY_EVENTS_ROUTE,
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: (request) => handleKeyEventsHttp({ buffer: keyEvents }, request),
+      }),
+      `llm-sensenova: key events route ${KEY_EVENTS_ROUTE}`,
     );
   });
 
@@ -1168,8 +1482,23 @@ export const PROBE_MODEL = 'deepseek-flash';
 /** 单次探测的超时（毫秒）。故意短于生产建连超时：探测要的是快速结论，不是结果本身。 */
 export const PROBE_TIMEOUT_MS = 10_000;
 
-/** 探测定时器的粒度（毫秒）。取 5s 以尊重最短 15s 的探测间隔。 */
-export const PROBE_TICK_MS = 3_000;
+/**
+ * 探测定时器的粒度（毫秒）。
+ *
+ * 2026-11-01：3_000 → 120_000（方案文档 §1.7 的 P0）。
+ *
+ * 原值 3s 意味着每个进程每小时最多跑 1,200 次探测。在 4 账户场景下这些探测
+ * **本身就是限流的主要贡献者之一**——11-01 实测「DSH 已静默 56 分钟，deepseek
+ * 仍然 429」，根因就是这条定时器在持续打 `deepseek-flash`。
+ *
+ * 为什么是 120s：实测「静默 10 分钟后单个 6 token 请求仍被拒」，恢复的真实
+ * 时间尺度是分钟到小时级，不是秒级。3s 探测在这一尺度下纯属噪声，且每次探测
+ * 都在给网关的「连续 429」计数 +1。120s 兼顾「及时发现恢复」与「不制造流量」。
+ *
+ * 注意：这里只调粒度，真正的退避仍由 key 池的 `probeInitialMs × factor^n` 决定，
+ * 两者叠加后实际间隔 ≥ 120s。
+ */
+export const PROBE_TICK_MS = 600_000;
 
 export interface ProbeSchedulerDeps {
   /** 池：取阻塞态条目并回写探测结果。 */

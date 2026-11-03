@@ -41,7 +41,13 @@ import type {
 } from '@deepseek-ai/dsh-llm';
 import { parseRetryAfterMs } from './accounts.ts';
 import { DEFAULT_QUEUE_TIMEOUT_MS, KeyedConcurrencyGate, type Release } from './concurrency.ts';
-import { extractErrorCode, fingerprint, summarize, type SenseNovaErrorLog } from './error-log.ts';
+import {
+  extractErrorCode,
+  fingerprint,
+  summarize,
+  type SenseNovaErrorLog,
+  type SenseNovaRateLimitEvent,
+} from './error-log.ts';
 import { groupGateKey, type GroupGapController, type GroupSchedulingConfig, type SensenovaGroupPool } from './group-pool.ts';
 
 /**
@@ -89,11 +95,25 @@ export const QUOTA_RETRY_AFTER_CEILING_MS = 300_000;
 const RETRY_POLICY_MAX_DELAY_MS = QUOTA_RETRY_AFTER_CEILING_MS;
 
 /**
- * 缺省重试次数预算。**刻意不同于官方的 `DEFAULT_MAX_RETRIES = 5`**：
- * 见 `DEFAULT_RETRY_POLICY_CONFIG` 的数值沿革（10 次的累计窗口仅 33 秒，
- * 对分钟级 TPM 窗口不够，曾导致 13/16 个回合作废）。
+ * 缺省重试次数预算。
+ *
+ * 2026-11-01 下调 24 → 6 → 现在 20（方案文档 §1.8）。
+ *
+ * 原值 24 是「插件内每次重试都换一把 key」时代的产物，实际上游调用是
+ * `24 × 内部轮换数`（实测 attempt p50 = 24、max = 81）。当日日志显示：30 次
+ * 「多点尝试才成功」的样本里，**29 次的前置耗时 ≥ 10 秒**（p50 = 1286s）——
+ * 起作用的是等待，不是换 key。那 23 次多余尝试的唯一效果，是给网关的
+ * 「连续 5 次 429 即熔断」计数 +1，主动喂出 424。
+ *
+ * 为什么最终是 20：配合 `QUOTA_EXHAUSTED_RETRY_FLOOR_MS = 15s`，总等待窗口
+ * = 20 × 15s ≈ 300s，**与原方案「一次等 300s」的总时长完全相同**，但中间
+ * 多出 20 次命中机会。16:00 的同环境对照证明：稳定版 15s × 4 次就成功了。
+ *
+ * 关键：次数与单次退避要一起看。把退避从 300s 砍到 15s 而不补次数，总窗口会
+ * 从 30 分钟塌缩到 90 秒；只补次数不砍退避，则会变成 6 小时的长睡。两者必须
+ * 按「总窗口守恒」成对调整。
  */
-export const DEFAULT_RETRY_MAX_RETRIES = 24;
+export const DEFAULT_RETRY_MAX_RETRIES = 20;
 /** 缺省本地退避起点（毫秒）＝官方的 `DEFAULT_INITIAL_DELAY_MS`。 */
 export const DEFAULT_RETRY_INITIAL_DELAY_MS = 500;
 /** 缺省抖动比例＝官方的 `DEFAULT_JITTER_RATIO`。 */
@@ -132,14 +152,26 @@ const FALLBACK_RETRY_POLICY: ResolvedRetryPolicy = resolveRetryPolicy(
 /** 配额类 429（code 8，rps/rpm exhausted）退避下限（毫秒）。2026-09-04 实测：速率桶补充 ≈1 个/14s，15s 覆盖一个完整补充周期。 */
 export const QUOTA_RATE_RETRY_FLOOR_MS = 15_000;
 /**
- * 真·配额耗尽（`quota_exhausted`，v0.5 P0）的退避下限（毫秒）。
+ * `insufficient_quota` 的退避下限（毫秒）。
  *
- * 🔴 2026-10-31 新增：商汤 `insufficient_quota` 独立出现时是**真额度耗尽**（账户级配额
- * 打满），恢复以分钟计；3s 起步的 tpm 探测档在这里是无效探测风暴（白打 key + 拖慢
- * 宿主重试节奏）。取 300s = 与 `QUOTA_RETRY_AFTER_CEILING_MS` 同值，宿主重试预算内
- * 一次性进入「冷静窗口」，期间不换 key（换 key 不增加账户配额，见 st-rotator 实测）。
+ * 2026-11-01 从 300_000 下调到 15_000（方案文档 §1.8）。
+ *
+ * 原判据（2026-10-31）：认为该 code 是「真额度耗尽」，恢复以分钟计，故取 300s。
+ * 但两份证据推翻了它：
+ *
+ *   1. **用户侧确认配额花不完**——5 小时窗口与周额度在控制台看着都用不掉，
+ *      这不是配额问题。该 code 的 message 本身就是 `inference exceeds tpm/rpm
+ *      limit`，和 `code 8` 一字不差，只是 code 不同。
+ *
+ *   2. **同环境 A/B 对照（16:00 实测）**：稳定版插件把同一条 message（code 8）
+ *      判成 15s，连续 4 次重试后于 16:07:12 成功；本插件判成 300s，同样 5 分钟
+ *      内只发出 1 次请求。**一个试 20 次，一个试 1 次。**
+ *
+ * 结论：`insufficient_quota` 与 `code 8` 是同一件事的两种 code，退避必须同级。
+ * 300s 的真正后果不是「等够了」，而是「重试次数被砍到 1/20」——在恢复时刻
+ * 随机的系统里，这等于把命中概率砍到 1/20。
  */
-export const QUOTA_EXHAUSTED_RETRY_FLOOR_MS = 300_000;
+export const QUOTA_EXHAUSTED_RETRY_FLOOR_MS = 15_000;
 /**
  * bili 网关「终端态限流」（424 bili_throttle_terminal）的退避下限（毫秒）。
  *
@@ -178,6 +210,9 @@ const MODEL_NOT_FOUND_CODE = 'MODEL_NOT_FOUND';
 const DISPLAY_NAME_OVERRIDES: ReadonlyMap<string, string> = new Map([
   ['sensenova-6.7-flash-lite', 'Sensenova 6.7 Flash Lite'],
   ['sensenova-6.8-flash-lite', 'SenseNova 6.8 Flash Lite'],
+  // 2026-11-03 新增（sensenova-docs/DIFF-vs-20261021.md）：新一代多模态智能体模型，
+  // 文档名称为「SenseNova 6.8 Flash」（注意与大写 Sense vs 小写的 eve 无关，按文档）。
+  ['sensenova-6.8-flash', 'SenseNova 6.8 Flash'],
   ['deepseek-v4-flash', 'DeepSeek V4 Flash'],
   ['deepseek-flash', 'DeepSeek V4.1 Flash'],
   ['deepseek-v4-pro', 'DeepSeek V4 Pro'],
@@ -219,6 +254,9 @@ const DISPLAY_NAME_OVERRIDES: ReadonlyMap<string, string> = new Map([
  */
 export const KNOWN_EFFORTS: ReadonlyMap<string, readonly string[]> = new Map([
   ['sensenova-6.8-flash-lite', ['none', 'low', 'medium', 'high', 'xhigh']],
+  // 6.8-flash：文档六档 minimal/low/medium/high/xhigh/max，思考**强制开启**不可关 ⇒
+  // 不提供 none（2026-11-03，DIFF-vs-20261021.md）。未实测的服务端词表，待 Phase 0 复测。
+  ['sensenova-6.8-flash', ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']],
   ['deepseek-v4-flash', ['none', 'low', 'medium', 'high', 'xhigh']],
   ['deepseek-flash', ['none', 'low', 'high', 'max']],
   ['deepseek-v4-pro', ['low', 'high', 'max']],
@@ -330,7 +368,9 @@ export interface SensenovaTimeouts {
  * 登记在此的模型：目录拉到后仍按目录声明走（含 image 时去重不重复加）；
  * 目录未加载时由本表保证能力不退化。
  */
-export const DOCUMENTED_VISION_MODELS = new Set(['kimi-k3', 'sensenova-6.8-flash-lite', 'deepseek-flash']);
+// 2026-11-03：新增 sensenova-6.8-flash —— 文档明确「图像输入（公网 URL / Base64）」，
+// 与 6.8-flash-lite 同为多模态（DIFF-vs-20261021.md 新章节）。
+export const DOCUMENTED_VISION_MODELS = new Set(['kimi-k3', 'sensenova-6.8-flash-lite', 'sensenova-6.8-flash', 'deepseek-flash']);
 
 /**
  * 文档确认**没有**视觉能力的模型（**不得**进入 `DOCUMENTED_VISION_MODELS`）。
@@ -378,6 +418,8 @@ export const DOCUMENTED_TEXT_ONLY_MODELS = new Set(['deepseek-v4-flash', 'glm-5.
  */
 export const MODEL_MAX_OUTPUT_OVERRIDES: ReadonlyMap<string, number> = new Map([
   ['sensenova-6.8-flash-lite', 65_536],
+  // 6.8-flash：文档 max_tokens 范围 [1,128K] ⇒ min(128K, 131072) = 131072（2026-11-03）。
+  ['sensenova-6.8-flash', 131_072],
   ['deepseek-v4-flash', 131_072],
   ['deepseek-flash', 131_072],
   ['glm-5.2', 131_072],
@@ -397,6 +439,8 @@ export const MODEL_MAX_OUTPUT_OVERRIDES: ReadonlyMap<string, number> = new Map([
  */
 export const MODEL_CONTEXT_OVERRIDES: ReadonlyMap<string, number> = new Map([
   ['sensenova-6.8-flash-lite', 262_144],
+  // 6.8-flash：文档「支持 1M 上下文」（2026-11-03）。
+  ['sensenova-6.8-flash', 1_048_576],
   ['deepseek-v4-flash', 1_048_576],
   ['deepseek-flash', 1_048_576],
   ['glm-5.2', 1_048_576],
@@ -436,6 +480,10 @@ export type SensenovaRequestParamKey =
  */
 export const MODEL_L2_PARAM_SUPPORT: ReadonlyMap<string, ReadonlySet<SensenovaRequestParamKey>> = new Map([
   ['sensenova-6.8-flash-lite', new Set<SensenovaRequestParamKey>(['top_p', 'frequency_penalty', 'presence_penalty', 'seed'])],
+  // 6.8-flash：文档支持 top_p / presence_penalty / frequency_penalty / seed /
+  // repetition_penalty（新增）/ parallel_tool_calls（2026-11-03）。L2 注入点与其余
+  // 视觉模型一致；repetition_penalty 不在宿主 GenerateOptions，不提供 L2 注入。
+  ['sensenova-6.8-flash', new Set<SensenovaRequestParamKey>(['top_p', 'frequency_penalty', 'presence_penalty', 'seed'])],
   ['deepseek-v4-flash', new Set<SensenovaRequestParamKey>(['top_p', 'frequency_penalty', 'presence_penalty', 'seed'])],
   ['deepseek-flash', new Set<SensenovaRequestParamKey>(['top_p', 'frequency_penalty', 'presence_penalty', 'seed'])],
   ['glm-5.2', new Set<SensenovaRequestParamKey>(['top_p', 'frequency_penalty', 'presence_penalty', 'seed', 'do_sample'])],
@@ -651,6 +699,13 @@ export interface SensenovaAdapterDeps {
    * 等 10 余处；旁路索引把改动隔离在「事件写入」这一个点上。
    */
   describeKey?: (key: string) => { label: string; ref: string } | undefined;
+  /**
+   * 实时 key 事件（2026-11-03）：把「这一把 key 开始发请求 / 撞了 429」交给宿主，
+   * 由设置页的 key 网格按真实节奏闪绿/红（与「演示红/绿」共用同一套动画）。
+   *
+   * 可选：未注入（单测、无 UI 的 profile）时静默，不影响请求路径。
+   */
+  onKeyEvent?: (event: { key: string; kind: 'start' | 'rate-limit' }) => void;
   fetchImpl?: typeof fetch;
   /** 每 key 并发闸；缺省为进程内实例（可注入以利测试）。 */
   concurrencyGate?: KeyedConcurrencyGate;
@@ -946,7 +1001,7 @@ function catalogExcludesReasoning(raw: Record<string, unknown>): boolean {
  */
 export const EFFORT_LABELS: ReadonlyMap<string, { name: string; description: string }> = new Map([
   ['none', { name: 'Off', description: '关闭思考通道，直接作答。适合简单问答、内容提取、格式转换，延迟最低。' }],
-  ['minimal', { name: 'Minimal', description: '最轻量思考。仅 glm-5.2 / kimi-k3 / v4.1 接受。' }],
+  ['minimal', { name: 'Minimal', description: '最轻量思考。glm-5.2 / kimi-k3 / v4.1 / 6.8-flash（后两者文档口径）接受。' }],
   ['low', { name: 'Low', description: '轻度推理，延迟与 token 消耗较低。适合简单任务与延迟敏感场景。' }],
   ['medium', { name: 'Medium', description: '中等推理，在速度与效果之间平衡。适合一般分析与内容生成。' }],
   ['high', { name: 'High', description: '增强推理，多数模型的服务端默认档。适合常规推理、代码生成。' }],
@@ -2088,6 +2143,55 @@ export class SensenovaAdapter extends LlmAdapter {
         );
       }
     }
+    // ── 固定间隔调度：预检 + 开始计时（2026-11-01）─────────────────────────
+    //
+    // 预检：所有组都还在「组间定时」窗口内时，任何 key 打出去都只是白撞一次 429，
+    // 不如直接把「最早可用的那一组还剩多久」当 pra 交给宿主。
+    // 计时：本组本轮第一次发请求前记录起点，供 groupGapMs 的「补时」计算。
+    {
+      const schedPre = groupPool?.config;
+      if (schedPre?.mode === 'fixed' && groupPool !== undefined) {
+        const preGroup = groupPool.watchKey(apiKey)?.groupIndex;
+        if (preGroup !== undefined) {
+          const waitMs = groupPool.earliestAvailableIn();
+          if (waitMs > 0) {
+            const pra = Math.max(1_000, Math.min(waitMs, QUOTA_RETRY_AFTER_CEILING_MS));
+            // 🔴 2026-11-01：这条「被组定时挡住」必须落日志 —— 它是调 groupGapMs 的
+            // 唯一直接依据。`code: 'pacing_window'` 刻意不是真实上游 code，
+            // 便于在统计里把它们与真正的 429 分开：它们**根本没有发出请求**。
+            this.deps.errorLog?.()?.record({
+              ts: new Date().toISOString(),
+              model: options.model,
+              status: 429,
+              code: 'pacing_window',
+              kind: 'rate',
+              quota: true,
+              message: `all ${groupPool.size} groups inside pacing window; next usable in ${pra}ms`,
+              phase: 'pacing',
+              result: 'error',
+              latencyMs: 0,
+              providerRetryAfterMs: pra,
+              rotated: false,
+              attempt: 0,
+              groupIndex: preGroup,
+              schedMode: 'fixed',
+              schedKeyGapMs: schedPre.keyGapMs,
+              schedGroupGapMs: schedPre.groupGapMs,
+              schedWaitMs: pra,
+              schedStep: 0,
+              account: fingerprint(apiKey),
+              session: fingerprint(options.sessionId),
+            });
+            throw new LlmError(
+              `llm-sensenova: all ${groupPool.size} groups are inside their pacing window; next usable in ${pra}ms；全部组都还在组间定时窗口内，约 ${pra}ms 后可用`,
+              'RATE_LIMIT',
+              { status: 429, providerRetryAfterMs: pra },
+            );
+          }
+          groupPool.beginGroup(preGroup);
+        }
+      }
+    }
     let response: Response | undefined;
     // 当前 attempt 持有的并发额度；成功进入流式阶段后保持到 finally 释放。
     let release: Release | undefined;
@@ -2121,6 +2225,32 @@ export class SensenovaAdapter extends LlmAdapter {
     let attemptIndex = 0;
     // 2026-10-23（方案2）：本请求内「429 内部等待重试」次数（独立于轮换，continue 不清零）。
     let internalRetries = 0;
+    // ── 固定间隔调度的日志埋点（2026-11-01）──────────────────────────────────
+    // 这两个值只用于写运行日志，不参与任何决策：
+    //   schedWaitMs   本次 attempt 前真的睡了多久（每次 attempt 头部重置）
+    //   schedStep     本组内第几把 key（1 起；换组归 1）
+    // 之所以要在 adapter 里维护而不是从 group-pool 反查：组池不知道「本次请求
+    // 已经试过同组哪几把」，那是本次 stream() 的局部事实。
+    let schedWaitMs = 0;
+    let schedStep = 0;
+    let schedLastGroup: number | undefined;
+    // 组循环轮次（2026-11-02）：1 = 第一轮（4 组各 4 把），全败后等窗口进第 2 轮；
+    // 第 2 轮再全败才抛宿主。抛出后宿主重试会重新进 stream()，轮次自然归 1。
+    let schedRound = 1;
+    /** 组装调度诊断字段；无组调度时返回空对象（旧日志格式保持不变）。 */
+    const schedTrace = (): Partial<SenseNovaRateLimitEvent> => {
+      const cfg = groupPool?.config;
+      if (cfg === undefined) return {};
+      const fields: Partial<SenseNovaRateLimitEvent> = { schedMode: cfg.mode };
+      if (cfg.mode === 'fixed') {
+        fields.schedKeyGapMs = cfg.keyGapMs;
+        fields.schedGroupGapMs = cfg.groupGapMs;
+        fields.schedWaitMs = schedWaitMs;
+        fields.schedStep = schedStep;
+        fields.schedRound = schedRound;
+      }
+      return fields;
+    };
 
     try {
       for (let rotations = 0; ; ) {
@@ -2139,6 +2269,25 @@ export class SensenovaAdapter extends LlmAdapter {
         // 「组容量（=组内 key 数=账户数）」额度，超出进组队列；无组（scheduling
         // 未配置）⇒ 回落 P0 行为：gate 键=apiKey、limit=每 key 并发。
         const groupInfo = groupPool !== undefined ? groupPool.watchKey(apiKey) : undefined;
+        // 固定间隔模式：本组第一次被本次请求使用 ⇒ 记下占用起点（beginGroup 幂等）。
+        //
+        // 🔴 2026-11-03 修复：初始 key 来自 `resolveApiKey → groupPool.pickStart`，那条路径
+        // 不会调 beginGroup；于是 `finishGroup` 遇到 usedStartedAt=0 直接早退 —— 请求的
+        // **第一个组**永远拿不到 groupGapMs 的占用窗口，换组节奏比设定快，表现为
+        // 「组间定时偶发不生效 / 顺序没按规则走」。
+        if (groupInfo !== undefined && groupPool?.config.mode === 'fixed') {
+          groupPool.beginGroup(groupInfo.groupIndex);
+        }
+        // 日志埋点：本次 attempt 前没有等待（等待发生在 429 分支里，那里会写回）。
+        schedWaitMs = 0;
+        // 日志埋点：组内第几把。同组继续 +1；换组（或首次）归 1。
+        if (groupInfo !== undefined) {
+          schedStep = groupInfo.groupIndex === schedLastGroup ? schedStep + 1 : 1;
+          schedLastGroup = groupInfo.groupIndex;
+        } else {
+          schedStep = 0;
+          schedLastGroup = undefined;
+        }
         const gateKey = groupInfo !== undefined ? groupGateKey(groupInfo.groupIndex) : apiKey;
         // 组容量 = 组内 key 数（每账户一把 ⇒ 账户数 A）；与旧「每 key 并发」取较大者，
   // 保证单账户 + concurrency>1 的既有配置不被组模型强行串行（行为向后兼容）。
@@ -2177,6 +2326,8 @@ export class SensenovaAdapter extends LlmAdapter {
             clearTimeout(connectTimer);
             options.signal?.removeEventListener('abort', onHostAbort);
           });
+          // 实时闪灯（2026-11-03）：请求即将发出 ⇒ 该 key 亮绿（与真实发包同一时刻）。
+          this.deps.onKeyEvent?.({ key: apiKey, kind: 'start' });
           attempt = await this.fetchImpl(`${connection.apiBase}/chat/completions`, {
             method: 'POST',
             headers: {
@@ -2215,6 +2366,15 @@ export class SensenovaAdapter extends LlmAdapter {
           // 其他组的联动冷却标记；AIMD 控制器据此衰减组间隙（8s 窗口内至多一次）。
           groupPool?.onSuccess(apiKey);
           groupGap?.recordSuccess();
+          // 固定间隔调度：成功也要结束本轮并补时（用户明确要求「成功也切组」）。
+          // 这一步让「本组在 groupGapMs 内不再被选中」，从而把机会让给下一组。
+          {
+            const schedOnSuccess = groupPool?.config;
+            if (schedOnSuccess?.mode === 'fixed') {
+              const okGroup = groupPool?.watchKey(apiKey)?.groupIndex;
+              if (okGroup !== undefined) groupPool?.finishGroup(okGroup, schedOnSuccess.groupGapMs);
+            }
+          }
           probeResetBySuccess = true;
           // v0.5 P0：请求成功也记一条运行日志（phase=attemptPhase, result=ok,
           // latencyMs=attempt 往返耗时）。「全记」是测试阶段的采样口径（E=全记），
@@ -2233,6 +2393,10 @@ export class SensenovaAdapter extends LlmAdapter {
             rotated: rotations > 0,
             attempt: attemptIndex,
             ...(groupInfo !== undefined ? { groupIndex: groupInfo.groupIndex } : {}),
+            // 2026-11-01：调度诊断（schedMode / schedKeyGapMs / schedGroupGapMs /
+            // schedWaitMs / schedStep）。成功行必须也带，否则没法算「每组第几把
+            // 成功率最高」这类调参依据。
+            ...schedTrace(),
             account: fingerprint(apiKey),
             ...(() => {
               const described = this.deps.describeKey?.(apiKey);
@@ -2277,6 +2441,9 @@ export class SensenovaAdapter extends LlmAdapter {
         // 401 轮换路径不变。并发闸已在源头抑制并发超限，此处为兜底。
         const classified = classify429Body(errText);
         const quota429 = attempt.status === 429 && classified.quota;
+        // 实时闪灯（2026-11-03）：真实 429 ⇒ 该 key 红闪（放在分类后、轮换/抛错前，
+        // 保证无论 fixed 还是 adaptive 路径都会亮）。
+        if (attempt.status === 429) this.deps.onKeyEvent?.({ key: apiKey, kind: 'rate-limit' });
         // 429001 分级探测档位：连续命中计数决定本次退避（3/5/10/15s，封顶后保持），
         // 命中即 +1——每次宿主重试都带一个递增的探测等待，成功后清零回到最短档。
         let dynamicFloorMs: number | undefined;
@@ -2313,7 +2480,19 @@ export class SensenovaAdapter extends LlmAdapter {
         // 同账户在其他组的 key 打账户级标记」。上层 keyPool 的 tpm 踢出判定继续
         // 并行工作（两者职责不同：keyPool 管「这把 key 连续命中」，组池管「这一轮
         // 的账户×key 组合整体退避」）。
-        if (attempt.status === 429) {
+        //
+        // 🔴 2026-11-02：fixed 模式**必须跳过**这两步（实测根因）：
+        // `reportRateLimit` 会让「本组整组冷却 90s 且随 strikes 指数翻倍」，而
+        // `pickWithinGroup` 开头就检查 `cooldownUntil > now` ⇒ 组内第 1 把 429 后
+        // 第 2/3/4 把**永远试不到**（11-01 晚 220 条日志 schedStep 全部 =1、
+        // schedWaitMs 全部 =0 的直接原因），宿主每重试一次 strikes 再涨，冷却
+        // 180s/360s 层层上涨。fixed 模式下组的「冷却」只有一种表达：
+        // `finishGroup` 的组间定时 —— 4 把全试完才生效，这正是用户设计。
+        // keyPool 的 tpm/rpm 上报保留（踢出阈值 2 次，4 把内不触发；且 fixed 的
+        // pickWithinGroup 本就不过滤运行态，语义是「组内每把都要试到」）。
+        const schedModeNow = groupPool?.config?.mode;
+        const fixedSched = schedModeNow === 'fixed';
+        if (attempt.status === 429 && !fixedSched) {
           groupPool?.reportRateLimit({
             key: apiKey,
             kind: classified.kind === 'quota_exhausted' ? 'quota_exhausted' : (classified.kind ?? 'rate'),
@@ -2372,6 +2551,8 @@ export class SensenovaAdapter extends LlmAdapter {
             // v0.5 P1：组维度诊断字段（无组调度时不出现在日志里）。
             ...(groupInfo !== undefined ? { groupIndex: groupInfo.groupIndex } : {}),
             ...(currentGapMs !== undefined ? { groupGapMs: currentGapMs } : {}),
+            // 2026-11-01：固定模式的四个旋钮 + 本次实际等待 + 组内序号。
+            ...schedTrace(),
             account: fingerprint(apiKey),
             // 🔴 2026-09-27 新增两个**可读**字段（设置页「错误记录」新增两列）：
             //   accountLabel  账户可读名（如「账户 2」）
@@ -2388,6 +2569,100 @@ export class SensenovaAdapter extends LlmAdapter {
         // 实测会话 a9ff64c7 一天刷出 1188 条 429，间隔 p50=0.13s、attempt 最高 23 ⇒ 全是
         // 「撞 429 → 立刻换下一把 key → 又 429」的自造噪音。把等待重试提到轮换**之前**，
         // 第一次 429 就等够时间再试，成功即止，不再空烧 20 把 key。
+        // ── 固定间隔调度（2026-11-01，mode = 'fixed'）─────────────────────────
+        //
+        // 规则（与 AIMD 的区别：不再「撞一次就放大间隔」）：
+        //   组内 1→2→3→4 顺序发，每把之间等 keyGapMs；
+        //   一组用完（任一把成功，或 4 把全 429）后，该组在 groupGapMs 内不再参与轮换，
+        //   指针切到下一组；直到所有组都还在窗口内，才抛给宿主。
+        //
+        // 为什么这样设计：快拒的 429（0.1-0.3s，网关层直接挡，请求没到上游）几乎零成本，
+        // 真正该做的是「换一把再试」而不是「睡更久」。实测 v0.2.8 以 0.12s/次的节奏连发
+        // 519 次、0 次 424 触发，说明快速轮换本身不会把网关打到熔断。
+        const schedCfg = groupPool?.config;
+        if (attempt.status === 429 && schedCfg?.mode === 'fixed' && groupPool !== undefined) {
+          const curGroup = groupPool.watchKey(apiKey)?.groupIndex;
+          if (curGroup !== undefined) {
+            // ① 同组还有没试过的 key → 等 keyGapMs 后换下一把（不换组）
+            const sibling = groupPool.pickWithinGroup(curGroup, tried);
+            if (sibling !== undefined && options.signal?.aborted !== true) {
+              const rejectedKey = apiKey;
+              release?.();
+              release = undefined;
+              const keyGap = Math.max(0, schedCfg.keyGapMs);
+              // 日志埋点：先记「本次准备睡多久」再记事件 —— 事件行必须能读出这次
+              // 429 之后等了 keyGapMs 才发下一把，否则调参时看不出节奏。
+              schedWaitMs = keyGap;
+              emitRateLimitEvent({ rotated: true, kicked: kickedThisAttempt });
+              if (keyGap > 0) await abortableSleep(keyGap, options.signal);
+              tried.add(rejectedKey);
+              apiKey = sibling;
+              rotations += 1;
+              continue;
+            }
+            // ② 本组耗尽 → 记账，然后走一步**宏观轮转**
+            //
+            // 2026-11-02 用户设计：宏观单位是**账户**，不是组。账户按固定序轮转、
+            // 永不跳过；每个账户各自持有组游标，轮到它时才决定用哪一组。于是 429 的
+            // 下一步是**下一个账户**，而不是同账户的下一个组 —— 同账户限流是连锁的，
+            // 换组没有意义；而「不跳过账户」保住了同账户两次使用之间的最短间隔。
+            //
+            // 一次完整遍历 = max(组数) 个宏观周期（每个周期每个账户各走一步）；
+            // `schedRound` 记的是完整遍历次数，不是宏观周期数 —— 预算来自设置页的
+            // `scheduling.roundBudget`（默认 2，可调 1-10），走满预算仍全败才抛宿主。
+            // 4 账户 × 5 组、预算 2 时 = 2 × 20 = 40 个宏观周期（160 次尝试）。
+            tried.add(apiKey);
+            groupPool.finishGroup(curGroup, schedCfg.groupGapMs);
+            {
+              const roundBudget = Math.max(1, Math.floor(schedCfg.roundBudget));
+              for (;;) {
+                const slot = groupPool.pickNextSlot(tried);
+                if (slot !== undefined) {
+                  emitRateLimitEvent({ rotated: true, kicked: kickedThisAttempt });
+                  groupPool.beginGroup(slot.groupIndex);
+                  release?.();
+                  release = undefined;
+                  apiKey = slot.key;
+                  rotations += 1;
+                  break;
+                }
+                // 所有账户的当前组都不可用 ⇒ 这一轮走完
+                if (schedRound >= roundBudget) {
+                  // ③ 走满轮次预算仍全败 → 抛宿主。pra = 最早可用组还剩多久（通常
+                  // 就是 groupGapMs 的尾部，秒级），宿主按它退避后重进（轮次归 1）。
+                  const waitMs = groupPool.earliestAvailableIn();
+                  const pra = Math.max(1_000, Math.min(waitMs > 0 ? waitMs : schedCfg.groupGapMs, QUOTA_RETRY_AFTER_CEILING_MS));
+                  release?.();
+                  release = undefined;
+                  const failure = httpError(attempt.status, errText, pra, pra);
+                  emitRateLimitEvent({
+                    rotated: false,
+                    kicked: kickedThisAttempt,
+                    ...(failure.failure.providerRetryAfterMs !== undefined
+                      ? { providerRetryAfterMs: failure.failure.providerRetryAfterMs }
+                      : {}),
+                  });
+                  throw failure;
+                }
+                // 本轮结束：等最早可用组 → 清 tried → 进下一轮。
+                // 等待放在插件内而非宿主：宿主退避会叠加自己的预算与日志噪音，
+                // 而这里的等待就是组间定时本身，等完立刻续发，节奏可预测。
+                const waitMs = groupPool.earliestAvailableIn();
+                if (waitMs > 0 && options.signal?.aborted !== true) {
+                  release?.();
+                  release = undefined;
+                  schedWaitMs = waitMs;
+                  emitRateLimitEvent({ rotated: true, kicked: kickedThisAttempt });
+                  await abortableSleep(waitMs, options.signal);
+                }
+                tried.clear();
+                schedRound += 1;
+              }
+              continue;
+            }
+          }
+        }
+
         const cap = connection.connectRetry?.maxRetries ?? 1;
         const waitBase =
           connection.connectRetry?.modelWaitMs?.[options.model] ??

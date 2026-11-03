@@ -50,6 +50,33 @@ test('normalizeGroupScheduling: 非法输入回落全默认（绝不抛）', () 
   const bad = normalizeGroupScheduling({ cooldownJitter: 7, groupGapMinMs: -5 });
   assert.equal(bad.cooldownJitter, undefined);
   assert.equal(bad.groupGapMinMs, undefined);
+  // 429 轮次预算：默认 2，合法 1-10 保留，越界回落缺省。
+  assert.equal(normalizeGroupScheduling(undefined).roundBudget, 2);
+  assert.equal(normalizeGroupScheduling({ roundBudget: 5 }).roundBudget, 5);
+  assert.equal(normalizeGroupScheduling({ roundBudget: 0 }).roundBudget, undefined);
+  assert.equal(normalizeGroupScheduling({ roundBudget: 99 }).roundBudget, undefined);
+  assert.equal(resolvedGroupScheduling({ roundBudget: 3 }).roundBudget, 3);
+  assert.equal(resolvedGroupScheduling({}).roundBudget, 2);
+});
+test('normalizeGroupScheduling: 保留每账户分组计划（2026-11-03 回归：分组必须真的生效）', () => {
+  const out = normalizeGroupScheduling({
+    groups: [
+      { account: 1, sizes: [4, 4, 4, 4, 4], gaps: [0, 0, 0, 0, 0, 0] },
+      { account: 2, sizes: [2, 2] },
+    ],
+  });
+  assert.deepEqual(out.groups, [
+    { account: 1, sizes: [4, 4, 4, 4, 4], gaps: [0, 0, 0, 0, 0, 0] },
+    { account: 2, sizes: [2, 2], gaps: [] },
+  ]);
+  // 解析后仍然带着计划（seedGroups 读的就是 resolved.scheduling.groups）。
+  const resolved = resolvedGroupScheduling(out);
+  assert.deepEqual(resolved.groups?.[0]?.sizes, [4, 4, 4, 4, 4]);
+  assert.deepEqual(resolvedGroupScheduling({}).groups, []);
+  // 非法项（缺 account / sizes 为空 / 数值非法）逐条跳过；全非法时不写该字段。
+  assert.equal(normalizeGroupScheduling({ groups: [{ sizes: [1] }] }).groups, undefined);
+  assert.equal(normalizeGroupScheduling({ groups: [{ account: 1, sizes: [] }] }).groups, undefined);
+  assert.equal(normalizeGroupScheduling({ groups: [{ account: 2, sizes: [0, -1] }] }).groups, undefined);
 });
 
 test('resolvedGroupScheduling: 缺失字段补默认', () => {

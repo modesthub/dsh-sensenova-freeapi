@@ -61,6 +61,17 @@ export interface ErrorLogEntry {
   groupIndex?: number;
   /** 本次实际应用的组间延时（毫秒，v0.5 P1 AIMD 组间隙新增）。 */
   groupGapMs?: number;
+  // ── 2026-11-01 固定间隔调度的诊断透传（详见 error-log.ts 同名注释）──
+  schedMode?: string;
+  schedKeyGapMs?: number;
+  schedGroupGapMs?: number;
+  schedWaitMs?: number;
+  schedStep?: number;
+  schedRound?: number;
+  /** 视觉模式（`bridge` 拖图 / `tool` 工具 / `chat` 纯文本，2026-11-02）。 */
+  visionMode?: string;
+  /** 视觉任务类型（image_reasoning / image_reasoning_multi / chat / bridge）。 */
+  visionTask?: string;
   retryFloorMs?: number;
   providerRetryAfterMs?: number;
   /** 探测档位索引（0 起）；仅 rpm/tpm 有。长期停在最大值 = 档位锁死（2026-09-24 新增）。 */
@@ -159,6 +170,20 @@ function toEntry(event: SenseNovaRateLimitEvent): ErrorLogEntry {
     ...(typeof event.latencyMs === 'number' ? { latencyMs: event.latencyMs } : {}),
     ...(typeof event.groupIndex === 'number' ? { groupIndex: event.groupIndex } : {}),
     ...(typeof event.groupGapMs === 'number' ? { groupGapMs: event.groupGapMs } : {}),
+    ...(typeof event.schedMode === 'string' && event.schedMode !== ''
+      ? { schedMode: event.schedMode }
+      : {}),
+    ...(typeof event.schedKeyGapMs === 'number' ? { schedKeyGapMs: event.schedKeyGapMs } : {}),
+    ...(typeof event.schedGroupGapMs === 'number' ? { schedGroupGapMs: event.schedGroupGapMs } : {}),
+    ...(typeof event.schedWaitMs === 'number' ? { schedWaitMs: event.schedWaitMs } : {}),
+    ...(typeof event.schedStep === 'number' ? { schedStep: event.schedStep } : {}),
+    ...(typeof event.schedRound === 'number' ? { schedRound: event.schedRound } : {}),
+    ...(typeof event.visionMode === 'string' && event.visionMode !== ''
+      ? { visionMode: event.visionMode }
+      : {}),
+    ...(typeof event.visionTask === 'string' && event.visionTask !== ''
+      ? { visionTask: event.visionTask }
+      : {}),
     ...(typeof event.retryFloorMs === 'number' ? { retryFloorMs: event.retryFloorMs } : {}),
     ...(typeof event.providerRetryAfterMs === 'number'
       ? { providerRetryAfterMs: event.providerRetryAfterMs }

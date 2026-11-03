@@ -60,6 +60,61 @@ export interface GroupSchedulingConfig {
   recoverWindowMs?: number;
   /** 全池冷却时的快返 Retry-After（毫秒），默认 8_000（acquire_fail_fast=8 秒）。 */
   failFastMs?: number;
+  /**
+   * 调度模式：
+   * - `'adaptive'`（旧）：AIMD 组间隙，撞 429 就 ×1.5 放大。
+   * - `'fixed'`（2026-11-01 新增，默认）：用固定的 `groupGapMs` 做「组间定时」，
+   *   不再自适应。理由：AIMD 在「快拒零成本」的场景下会误判——它把网关层的
+   *   瞬间拒绝当成「需要降速」的信号，结果越撞越慢，而真正该做的是换把 key 再试。
+   */
+  mode?: 'adaptive' | 'fixed';
+  /**
+   * 「组间定时」（毫秒），默认 20_000。
+   *
+   * 语义：一轮组使用（从组内第一次发请求，到最后一次响应结束）至少占用这么久。
+   * 不足则记 `nextAvailableAt = usedStartedAt + groupGapMs`，该组在此期间不参与轮换。
+   * 目的：4 组轮一圈时，每个账户两次使用之间至少隔 `groupGapMs × (组数−1)`。
+   */
+  groupGapMs?: number;
+  /**
+   * 「key 间定时」（毫秒），默认 1_000。
+   *
+   * 语义：组内一把 key 返回 429 后，等这么久再发下一把。
+   * 目的：给刚撞墙的 key 一点喘息，同时控制单组的消耗速度。
+   */
+  keyGapMs?: number;
+  /**
+   * 429 轮次预算（2026-11-03）：走完几轮完整遍历仍全部 429 ⇒ 抛宿主。
+   *
+   * 语义：一轮 = max(各账户组数) 个宏观周期；每轮里每个账户按游标各走一步，
+   * 组间按 groupGapMs 让位。默认 2（4 账户 × 5 组 = 2 × 20 = 40 个宏观周期、
+   * 160 次尝试后抛宿主）。调大 = 在插件内多扛几轮、少让宿主退避；调小 = 更快
+   * 把 429 交给宿主。只影响 fixed 模式。
+   */
+  roundBudget?: number;
+  /**
+   * 分组形状（2026-11-02），默认 `'by-account'`。
+   *
+   * - `'by-account'`：一组 = 一个账户的全部 key（组内换 key 是同账户换凭据）。
+   *   实测（11-02 晨 22min）：每 key 压力更均匀（18-25 步），但同账户限流状态
+   *   共享 ⇒ 组内 2/3/4 把命中率低，1.07 次成功/分钟。
+   * - `'by-slot'`：组 i = 每个账户的第 i 把（组内换 key 即换账户）。
+   *   实测（同日 33min）：每步都在试探不同账户的恢复，1.55 次成功/分钟，
+   *   但单账户两次使用没有时间保底。
+   * 切换即时生效（seed 幂等，下次请求重建组）。
+   */
+  grouping?: 'by-account' | 'by-slot';
+  /**
+   * 每账户的组切分计划（设置页「账户与分组」写的 scheduling.groups）。
+   *
+   * 例：{ account: 1, sizes: [4,4,4,4,4] } ⇒ 账户 1 的 20 把切成 5 组、每组 4 把；
+   * gaps 长度 = sizes+1，表示每组前面/末尾有几个孤立 key（不进轮换）。
+   *
+   * 🔴 2026-11-03 修复：此前这个字段只存在于 schemastery schema，normalizeGroupScheduling
+   * 不认识它 ⇒ 解析时被丢掉，seedGroups 永远读不到计划、回落「每个账户一组」，
+   * 现场表现就是「界面明明分了 4 把一组，实际却按整账户 20 把连发」。
+   */
+  groups?: { account: number; sizes: number[]; gaps?: number[] }[];
 }
 
 /** 缺省组调度配置（frozen，所有字段都有值，供 normalize 回落）。 */
@@ -76,11 +131,56 @@ export const DEFAULT_GROUP_SCHEDULING: Readonly<Required<GroupSchedulingConfig>>
   groupGapRecoverFactor: 0.95,
   recoverWindowMs: 8_000,
   failFastMs: 8_000,
+  mode: 'fixed',
+  groupGapMs: 20_000,
+  keyGapMs: 1_000,
+  roundBudget: 2,
+  grouping: 'by-account',
+  groups: [],
 });
 
-function clamp(value: number, min: number, max: number): number {
-  return value < min ? min : value > max ? max : value;
+/**
+ * 按计划把一个账户的 key 切成若干组，并让出空档（2026-11-02）。
+ *
+ * @param keys  - 该账户的 key，**已按 slot 升序**。
+ * @param sizes - 每组的把数，如 [4, 4]。
+ * @param gaps  - 空档数（长度 = sizes.length + 1）：`gaps[i]` 是第 i 组前面的孤立 key 数，
+ *                最后一项是末尾的孤立数。空档里的 key **不进任何组**（不参与轮换）。
+ * @returns groups（每组 key 列表）+ orphans（未参与轮换的 key 数）。
+ */
+export function planGroups(
+  keys: readonly string[],
+  sizes: readonly number[],
+  gaps: readonly number[] = [],
+): { groups: string[][]; orphans: number } {
+  const groups: string[][] = [];
+  let cursor = 0;
+  for (let index = 0; index < sizes.length; index += 1) {
+    const gap = Math.max(0, Math.floor(gaps[index] ?? 0));
+    cursor += gap;
+    const size = Math.max(1, Math.floor(sizes[index] ?? 1));
+    const slice = keys.slice(cursor, cursor + size);
+    cursor += slice.length;
+    if (slice.length > 0) groups.push(slice);
+  }
+  return { groups, orphans: Math.max(0, keys.length - cursor) };
 }
+
+/** 兼容旧调用：只取组，忽略空档信息（空档中的 key 视为不参与轮换）。 */
+export function sliceGroups(keys: readonly string[], sizes: readonly number[]): string[][] {
+  return planGroups(keys, sizes).groups;
+}
+
+/** 账户 id 自然序：account-2 排在 account-10 之前；无数字后缀的排后面按字典序。 */
+export function compareAccountId(left: string, right: string): number {
+  const a = /(\d+)\s*$/.exec(left);
+  const b = /(\d+)\s*$/.exec(right);
+  if (a !== null && b !== null) return Number(a[1]) - Number(b[1]) || left.localeCompare(right);
+  if (a !== null) return -1;
+  if (b !== null) return 1;
+  return left.localeCompare(right);
+}
+
 
 /**
  * 归一化组调度配置：非法值逐个回落缺省，**绝不抛**（与 normalizePoolPolicy
@@ -121,6 +221,35 @@ export function normalizeGroupScheduling(value: unknown): GroupSchedulingConfig 
   if (recoverWindowMs !== undefined) out.recoverWindowMs = recoverWindowMs;
   const failFastMs = num('failFastMs', 100, 120_000);
   if (failFastMs !== undefined) out.failFastMs = failFastMs;
+  if (input.mode === 'adaptive' || input.mode === 'fixed') out.mode = input.mode;
+  if (input.grouping === 'by-account' || input.grouping === 'by-slot') out.grouping = input.grouping;
+  const groupGapMs = num('groupGapMs', 1_000, 600_000);
+  if (groupGapMs !== undefined) out.groupGapMs = groupGapMs;
+  const keyGapMs = num('keyGapMs', 0, 60_000);
+  if (keyGapMs !== undefined) out.keyGapMs = keyGapMs;
+  // 分组计划（2026-11-03 修复）：account + sizes 合法才收下，非法项跳过；
+  // gaps 缺省为空数组。此前这里不认 groups ⇒ 运行期计划被丢，见字段注释。
+  if (Array.isArray(input.groups)) {
+    const plan: { account: number; sizes: number[]; gaps: number[] }[] = [];
+    for (const entry of input.groups) {
+      if (entry === null || typeof entry !== 'object') continue;
+      const row = entry as Record<string, unknown>;
+      const account = typeof row.account === 'number' && Number.isFinite(row.account) ? Math.round(row.account) : 0;
+      if (account < 1) continue;
+      const sizes = Array.isArray(row.sizes)
+        ? row.sizes.filter((n): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 1).map((n) => Math.round(n))
+        : [];
+      if (sizes.length === 0) continue;
+      const gaps = Array.isArray(row.gaps)
+        ? row.gaps.filter((n): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0).map((n) => Math.round(n))
+        : [];
+      plan.push({ account, sizes, gaps });
+    }
+    if (plan.length > 0) out.groups = plan;
+  }
+  // 预算必须是整数轮（1-10）：0 会让「一轮都没走就抛」，与 fixed 模式语义相反。
+  const roundBudget = num('roundBudget', 1, 10);
+  if (roundBudget !== undefined) out.roundBudget = Math.round(roundBudget);
   // 只返回有效字段；调用方逐字段 ?? DEFAULT。空对象也合法（=全默认）。
   return out;
 }
@@ -147,6 +276,12 @@ export function resolvedGroupScheduling(
     groupGapRecoverFactor: src.groupGapRecoverFactor ?? fallback.groupGapRecoverFactor,
     recoverWindowMs: src.recoverWindowMs ?? fallback.recoverWindowMs,
     failFastMs: src.failFastMs ?? fallback.failFastMs,
+    mode: src.mode ?? fallback.mode,
+    groupGapMs: src.groupGapMs ?? fallback.groupGapMs,
+    keyGapMs: src.keyGapMs ?? fallback.keyGapMs,
+    roundBudget: src.roundBudget ?? fallback.roundBudget,
+    grouping: src.grouping ?? fallback.grouping,
+    groups: src.groups ?? fallback.groups,
   };
 }
 
@@ -163,6 +298,10 @@ export function groupCooldownMs(strikes: number, config: Readonly<Required<Group
 export interface KeyGroup {
   index: number;
   keys: readonly string[];
+  /** 所属账户 id（`account-1` 之类）；空串表示未标注（旧 seed 形态，每组合成一个账户）。 */
+  account: string;
+  /** 在该账户内的组序号（0 起）：第 r 次轮到该账户时用 `ordinal = 游标 % 组数`。 */
+  ordinal: number;
   /** 组冷却截止（epoch ms）；0 表示未在冷却。整组退避用。 */
   cooldownUntil: number;
   /** 组内累计 429 次数（成功清零，退避公式的 n）。 */
@@ -173,6 +312,24 @@ export interface KeyGroup {
   lastKeyIndex: number;
   /** 账户级联动：accountId → 该账户在组内的冷却截止。 */
   accountCooldown: Map<string, number>;
+  /**
+   * 本组「本轮使用」的起始时刻（epoch ms）：组内第一次发请求时写入。
+   * 用于计算「组间定时」——从首次发请求到最后一次响应结束的耗时。
+   * 0 表示本组当前没有进行中的一轮。
+   */
+  usedStartedAt: number;
+  /**
+   * 本组下次可被使用的时刻（epoch ms）。
+   *
+   * 2026-11-01 新增（固定间隔调度）：一轮结束后置为
+   * `max(now, usedStartedAt + groupGapMs)`。这样即使一轮只花 3 秒，
+   * 该组也要等满 groupGapMs 才重新参与轮换，从而让「× (组数-1)」的
+   * 冷却时间真正落在别的组身上。
+   *
+   * 与 `cooldownUntil` 的区别：`cooldownUntil` 是「因为在限流而被迫退避」，
+   * 这个是「因为配额分摊而主动让位」。两者取 max 生效。
+   */
+  nextAvailableAt: number;
 }
 
 /** snapshot(): 对外只读快照的组列表。 */
@@ -198,6 +355,16 @@ export interface GroupRateLimitInput {
   /** 触发 429 的 key 原文。 */
   key: string;
   kind: 'tpm' | 'rpm' | 'rate' | 'quota_exhausted';
+}
+
+/** seed() 的组描述：显式给出账户与组号（新增形态）。 */
+export interface SeedGroup {
+  /** 组内 key 列表（顺序即组内轮换顺序）。 */
+  keys: readonly string[];
+  /** 所属账户 id。 */
+  account: string;
+  /** 该账户内的组序号（0 起，连续）。 */
+  ordinal: number;
 }
 
 export interface SensenovaGroupPoolDeps {
@@ -226,8 +393,25 @@ export class SensenovaGroupPool {
   private readonly keyToAccount = new Map<string, string>();
   /** 账户 id → 该账户全部 key。 */
   private readonly accountKeys = new Map<string, Set<string>>();
-  /** 组游标（下一请求优先考虑的组；pickNext 环回推进）。 */
-  private cursor = 0;
+  /**
+   * 账户轮转序（宏观序列，永不跳过、永不换序）。
+   *
+   * 2026-11-02 改：原先是「全局组游标」，序列由组的排列顺序决定；现在宏观单位是
+   * **账户**，组只是账户被轮到时才决定的「微观」选择。于是：
+   *   - `accountOrder` 是账户的固定循环序；
+   *   - `accountCursor` 指向**下一个**要轮到的账户；
+   *   - `groupCursor` 是每个账户**各自**的组游标，轮到它并被真正用到时才 +1。
+   *
+   * 这样 4 账户 × 1 组 ⇒ 1→2→3→4（与改造前一致）；1 账户 × 3 组 ⇒ 1→1′→1″；
+   * 3 账户 3/1/2 组 ⇒ 1→2→3→1′→2→3′→1″…（只有 1 组的账户每轮都用同一组，不跳过）。
+   */
+  private accountOrder: string[] = [];
+  /** 下一个要轮到的账户在 accountOrder 中的下标。 */
+  private accountCursor = 0;
+  /** 账户 → 该账户「下一次该用第几组」（对组数取模）。 */
+  private readonly groupCursor = new Map<string, number>();
+  /** 账户 → 该账户的组下标列表（按 ordinal 升序）。 */
+  private readonly ordinalsByAccount = new Map<string, number[]>();
 
   constructor(deps: SensenovaGroupPoolDeps) {
     this.cfg = () => resolvedGroupScheduling(deps.config());
@@ -247,14 +431,22 @@ export class SensenovaGroupPool {
    * @param accountOf - key → 账户 id；同一账户的 key 分属不同组时，联动冷却会把
    *   它们各自所在的组**全部**冷却（账号级联动的实现基础）。
    */
-  seed(groups: readonly (readonly string[])[], accountOf?: (key: string) => string | undefined): string[] {
+  seed(groups: readonly (readonly string[] | SeedGroup)[], accountOf?: (key: string) => string | undefined): string[] {
     const dropped: string[] = [];
     // 重建 key→组 映射要与现有组保持一致：只处理「本次传入」的组，不碰旧组的键。
     const fresh: KeyGroup[] = [];
     const seen = new Set<string>();
     for (let index = 0; index < groups.length; index += 1) {
-      const keys = groups[index];
-      if (keys === undefined || keys.length === 0) continue;
+      const entry = groups[index];
+      if (entry === undefined) continue;
+      // 两种入参形态：数组 = 旧形态（每组自成一个账户），对象 = 显式账户+组号。
+      const isBare = Array.isArray(entry);
+      const keys: readonly string[] = isBare ? (entry as readonly string[]) : (entry as SeedGroup).keys;
+      if (keys.length === 0) continue;
+      const account = isBare
+        ? (accountOf?.(keys[0] ?? '') ?? `solo-${index}`)
+        : (entry as SeedGroup).account;
+      const ordinal = isBare ? 0 : (entry as SeedGroup).ordinal;
       const normalized = keys.filter((key) => typeof key === 'string' && key.length > 0);
       // 跨组重复 key 在本池内非法：丢弃重复者。
       const unique: string[] = [];
@@ -269,6 +461,8 @@ export class SensenovaGroupPool {
       fresh.push({
         index,
         keys: unique,
+        account: account.length > 0 ? account : `solo-${index}`,
+        ordinal,
         // 保留旧组状态（冷却/连击/strikes）——seed 幂等的意义就在于此。
         ...this.#existingGroupState(index),
       });
@@ -289,6 +483,7 @@ export class SensenovaGroupPool {
       }
     }
     this.groups = fresh;
+    this.#rebuildCarousel();
     // 清理已不存在的 key 残留映射。
     for (const [key] of this.keyToGroup) {
       if (!seen.has(key)) this.keyToGroup.delete(key);
@@ -300,19 +495,52 @@ export class SensenovaGroupPool {
         this.keyToAccount.delete(key);
       }
     }
-    this.cursor = clamp(this.cursor, 0, Math.max(0, this.groups.length - 1));
     return dropped;
   }
 
-  #existingGroupState(index: number): Pick<KeyGroup, 'cooldownUntil' | 'strikes' | 'pending' | 'lastKeyIndex' | 'accountCooldown'> {
+  /**
+   * 重建账户轮转序与「账户 → 组下标」索引。
+   *
+   * 账户序按 id 尾数自然升序（`account-2` < `account-10`），未带数字的按字典序排在后。
+   * 组下标按 `ordinal` 升序，保证「第 r 次轮到该账户用第 r 组」。
+   */
+  #rebuildCarousel(): void {
+    this.ordinalsByAccount.clear();
+    const order: string[] = [];
+    for (const group of this.groups) {
+      let list = this.ordinalsByAccount.get(group.account);
+      if (list === undefined) {
+        list = [];
+        this.ordinalsByAccount.set(group.account, list);
+        order.push(group.account);
+      }
+      list.push(group.index);
+    }
+    for (const list of this.ordinalsByAccount.values()) {
+      list.sort((a, b) => (this.groups[a]?.ordinal ?? 0) - (this.groups[b]?.ordinal ?? 0) || a - b);
+    }
+    order.sort(compareAccountId);
+    this.accountOrder = order;
+    // 已消失账户的组游标一并清掉（否则账户增删后残留相位）。
+    for (const account of [...this.groupCursor.keys()]) {
+      if (!this.ordinalsByAccount.has(account)) this.groupCursor.delete(account);
+    }
+    this.accountCursor = this.accountOrder.length === 0 ? 0 : this.accountCursor % this.accountOrder.length;
+  }
+
+  #existingGroupState(index: number): Pick<KeyGroup, 'cooldownUntil' | 'strikes' | 'pending' | 'lastKeyIndex' | 'accountCooldown' | 'usedStartedAt' | 'nextAvailableAt'> {
     const prior = this.groups[index];
-    if (prior === undefined) return { cooldownUntil: 0, strikes: 0, pending: 0, lastKeyIndex: -1, accountCooldown: new Map() };
+    if (prior === undefined) {
+      return { cooldownUntil: 0, strikes: 0, pending: 0, lastKeyIndex: -1, accountCooldown: new Map(), usedStartedAt: 0, nextAvailableAt: 0 };
+    }
     return {
       cooldownUntil: prior.cooldownUntil,
       strikes: prior.strikes,
       pending: prior.pending,
       lastKeyIndex: prior.lastKeyIndex,
       accountCooldown: prior.accountCooldown,
+      usedStartedAt: prior.usedStartedAt ?? 0,
+      nextAvailableAt: prior.nextAvailableAt ?? 0,
     };
   }
 
@@ -344,61 +572,192 @@ export class SensenovaGroupPool {
     return false;
   }
 
+  /** 当前宏观轮转指向的账户（下一次轮到谁）。 */
+  nextAccount(): string | undefined {
+    return this.accountOrder[this.accountCursor];
+  }
+
+  /** 账户轮转序只读副本（日志 / 测试用）。 */
+  get accounts(): readonly string[] {
+    return this.accountOrder;
+  }
+
+  /** 各账户组数的最大值：一轮 = 该值个宏观周期（走遍全部组算 1 轮）。 */
+  maxGroupCount(): number {
+    let max = 0;
+    for (const list of this.ordinalsByAccount.values()) {
+      if (list.length > max) max = list.length;
+    }
+    return max;
+  }
+
+  /** 某账户当前该用的组下标（不推进游标）。 */
+  currentGroupOf(account: string): number | undefined {
+    const ordinals = this.ordinalsByAccount.get(account);
+    if (ordinals === undefined || ordinals.length === 0) return undefined;
+    const cursor = this.groupCursor.get(account) ?? 0;
+    return ordinals[((cursor % ordinals.length) + ordinals.length) % ordinals.length];
+  }
+
   /**
-   * 选中「下一把可用 key」：从游标开始环回。
-   *   - pickStart（并发交错）：停留在当前组，组内轮转取可用 key；
-   *   - pickNext（轮换语义）：跳到下一可用组落位；
-   *   两组都会跳过「整组冷却且无在途」的组与「账户级冷却」的 key；
-   *   全池无可用 key → undefined（调用方走 fail-fast 快返路径）。
+   * 走一步宏观轮转（2026-11-02）：**宏观单位是账户，不是组**。
+   *
+   * 序列：账户按 accountOrder 固定循环，永不跳过、永不换序；微观：轮到某账户时
+   * 用它的「当前组」= groupCursor[account] % 该账户组数。
+   *
+   * 该账户当前组此刻不可用（冷却 / 组间定时窗口 / 组内 key 全被 exclude 或账户级冷却）时，
+   * 只让出这一次轮到的机会，**不推进它的组游标**，继续看下一个账户 —— 账户始终留在轮转序里，
+   * 同账户的最短间隔（A−1 步）不被压缩；转满一圈仍无可用 ⇒ undefined（调用方等待或 fail-fast）。
+   *
+   * 组游标只在「这一组真的给出了 key」时前进，保证每组每轮只被用一次。
    */
-  pickStart(exclude?: ReadonlySet<string>): string | undefined {
-    return this.#pick(exclude, false);
-  }
-
-  /** 推进组游标到下一可用组（轮换到下一组，避免同一账户连续撞 429 空转）。 */
-  pickNext(exclude?: ReadonlySet<string>): string | undefined {
-    return this.#pick(exclude, true);
-  }
-
-  #pick(exclude: ReadonlySet<string> | undefined, advance: boolean): string | undefined {
-    const total = this.groups.length;
+  step(exclude?: ReadonlySet<string>): { groupIndex: number; key: string } | undefined {
+    const total = this.accountOrder.length;
     if (total === 0) return undefined;
     const now = this.now();
-    // pickNext 从游标的**下一组**开始环回；pickStart 停留在当前组。
-    const start = advance ? (this.cursor + 1) % total : this.cursor;
-    for (let step = 0; step < total; step += 1) {
-      const index = (start + step) % total;
-      const group = this.groups[index];
-      if (group === undefined) continue;
-      const cooling = group.cooldownUntil > now;
-      if (cooling && group.pending === 0) continue; // 整组冷却且无在途 ⇒ 跳过
-      const keys = group.keys;
-      if (keys.length === 0) continue;
-      if (advance) {
-        // 轮换语义：取该组第一把「可用（不在 exclude、未被账户级冷却）」，落位该组。
-        for (let offset = 0; offset < keys.length; offset += 1) {
-          const key = keys[offset];
-          if (key === undefined) continue;
-          if (exclude !== undefined && exclude.has(key)) continue;
-          if (this.#isAccountCooled(key, now)) continue;
-          this.cursor = index;
-          return key;
-        }
-        continue; // 该组全不可用 ⇒ 试下一组
-      }
-      // pickStart 语义：组内轮转（上一位的下一位起），逐把检查可用性。
-      for (let offset = 1; offset <= keys.length; offset += 1) {
-        const keyIndex = (group.lastKeyIndex + offset) % keys.length;
-        const key = keys[keyIndex];
+    for (let hop = 0; hop < total; hop += 1) {
+      const account = this.accountOrder[this.accountCursor];
+      this.accountCursor = (this.accountCursor + 1) % total;
+      if (account === undefined) continue;
+      const ordinals = this.ordinalsByAccount.get(account);
+      if (ordinals === undefined || ordinals.length === 0) continue;
+      const cursor = this.groupCursor.get(account) ?? 0;
+      const groupIndex = ordinals[cursor % ordinals.length];
+      if (groupIndex === undefined) continue;
+      const group = this.groups[groupIndex];
+      if (group === undefined || group.keys.length === 0) continue;
+      if (Math.max(group.nextAvailableAt, group.cooldownUntil) > now && group.pending === 0) continue;
+      // 组内按 lastKeyIndex 轮转（与改造前的 pickStart 一致）：成功请求也要摊到
+      // 组内各把 key 上，否则只有第 1 把被反复使用，其余三把永远轮不到。
+      const size = group.keys.length;
+      for (let offset = 1; offset <= size; offset += 1) {
+        const keyIndex = (group.lastKeyIndex + offset + size) % size;
+        const key = group.keys[keyIndex];
         if (key === undefined) continue;
         if (exclude !== undefined && exclude.has(key)) continue;
         if (this.#isAccountCooled(key, now)) continue;
         group.lastKeyIndex = keyIndex;
-        return key;
+        this.groupCursor.set(account, (cursor + 1) % ordinals.length);
+        return { groupIndex, key };
       }
-      // 该组 key 全被 exclude/账户冷却排除 ⇒ 尝试下一组（不推进游标）。
     }
-    return undefined; // 全池无可用 key ⇒ fail-fast
+    return undefined;
+  }
+
+  /** 请求入口取 key（走一步轮转）。 */
+  pickStart(exclude?: ReadonlySet<string>): string | undefined {
+    return this.step(exclude)?.key;
+  }
+
+  /** 429 后换一组再试（同一步轮转，天然落到下一个账户）。 */
+  pickNext(exclude?: ReadonlySet<string>): string | undefined {
+    return this.step(exclude)?.key;
+  }
+
+  /** 429 后换组：同时给出组号与 key（adapter 固定间隔路径用）。 */
+  pickNextSlot(exclude?: ReadonlySet<string>): { groupIndex: number; key: string } | undefined {
+    return this.step(exclude);
+  }
+
+  /**
+   * 组内按 **keys 数组顺序**（即 slot 1→2→3→4）取第一把可用的 key。
+   *
+   * 与 `pickStart` 的「从 lastKeyIndex 轮转」不同：这里是从头顺序遍历，
+   * 但会把**最后试到的下标**写回 `lastKeyIndex`。这样本组耗尽后，下一次
+   * `pickStart`/`step` 从下一把起手又正好回到 slot 1，不会在第二轮把
+   * 入口顺序变成 2→1→3→4。语义是「一轮之内按编号逐个试，下一轮仍从 1 开始」。
+   *
+   * @param groupIndex 组下标
+   * @param exclude 本轮已试过的 key（不会被再次返回）
+   * @returns undefined = 本组在本轮已无可用 key
+   */
+  pickWithinGroup(groupIndex: number, exclude?: ReadonlySet<string>): string | undefined {
+    const group = this.groups[groupIndex];
+    if (group === undefined) return undefined;
+    const now = this.now();
+    // 本轮已结束且还在定时窗口内 ⇒ 该组不可再取（这是「组间定时」的强制执行点）。
+    if (Math.max(group.nextAvailableAt, group.cooldownUntil) > now) return undefined;
+    for (let index = 0; index < group.keys.length; index += 1) {
+      const key = group.keys[index];
+      if (key === undefined) continue;
+      if (exclude !== undefined && exclude.has(key)) continue;
+      if (this.#isAccountCooled(key, now)) continue;
+      group.lastKeyIndex = index;
+      return key;
+    }
+    return undefined;
+  }
+
+  /** 开始一轮组使用：记录起始时刻（已有进行中的一轮则不覆盖）。 */
+  beginGroup(groupIndex: number): void {
+    const group = this.groups[groupIndex];
+    if (group === undefined) return;
+    if (group.usedStartedAt === 0) group.usedStartedAt = this.now();
+  }
+
+  /**
+   * 结束一轮组使用：置 `nextAvailableAt = max(now, usedStartedAt + gapMs)`。
+   *
+   * 这就是「组间定时」的实现 —— 一轮只花了 3 秒也要补到 gapMs，
+   * 从而保证「轮回到本组」时已经过了 gapMs ×（组数−1）。
+   *
+   * @returns 实际补齐后的下次可用时刻
+   */
+  finishGroup(groupIndex: number, gapMs: number): number {
+    const group = this.groups[groupIndex];
+    if (group === undefined) return 0;
+    // 幂等：本轮已经结束过（usedStartedAt 已清）就直接返回，不重新计时。
+    // 否则反复调用会把 nextAvailableAt 越推越远，形成「永远等不到」的死锁。
+    if (group.usedStartedAt === 0) return group.nextAvailableAt;
+    const now = this.now();
+    const target = group.usedStartedAt + Math.max(0, gapMs);
+    group.nextAvailableAt = Math.max(now, target);
+    group.usedStartedAt = 0;
+    return group.nextAvailableAt;
+  }
+
+  /**
+   * 按账户轮转序「窥视」下一个可用组（不推进任何游标）。
+   *
+   * 用于日志 / 诊断：真正取 key 走 step()（会推进游标）。
+   *
+   * @returns 组下标；undefined = 所有组都还没到点
+   */
+  pickAvailableGroup(now: number = this.now()): number | undefined {
+    const total = this.accountOrder.length;
+    if (total === 0) return undefined;
+    for (let hop = 0; hop < total; hop += 1) {
+      const account = this.accountOrder[(this.accountCursor + hop) % total];
+      if (account === undefined) continue;
+      const ordinals = this.ordinalsByAccount.get(account);
+      if (ordinals === undefined || ordinals.length === 0) continue;
+      const cursor = this.groupCursor.get(account) ?? 0;
+      const index = ordinals[cursor % ordinals.length];
+      if (index === undefined) continue;
+      const group = this.groups[index];
+      if (group === undefined || group.keys.length === 0) continue;
+      const readyAt = Math.max(group.nextAvailableAt, group.cooldownUntil);
+      if (readyAt > now) continue;
+      return index;
+    }
+    return undefined;
+  }
+
+  /**
+   * 距离「最早有一组可用」还要多久（毫秒）。
+   *
+   * 用于把所有组都试完后给宿主一个准确的 pra —— 不再拍脑袋固定 20s，
+   * 而是「最早那个组的 nextAvailableAt 减现在」。
+   */
+  earliestAvailableIn(now: number = this.now()): number {
+    let best = Number.POSITIVE_INFINITY;
+    for (const group of this.groups) {
+      if (group.keys.length === 0) continue;
+      const readyAt = Math.max(group.nextAvailableAt, group.cooldownUntil);
+      if (readyAt < best) best = readyAt;
+    }
+    if (!Number.isFinite(best)) return 0;
+    return Math.max(0, best - now);
   }
 
   /**

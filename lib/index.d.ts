@@ -149,6 +149,27 @@ interface SenseNovaRateLimitEvent {
   groupIndex?: number;
   /** 本次实际应用的组间延时（毫秒，v0.5 P1 AIMD 组间隙新增）。 */
   groupGapMs?: number;
+  /** 调度模式（`'fixed'` / `'adaptive'`）。未配置组调度时缺省。 */
+  schedMode?: string;
+  /** 固定模式下**配置的**组内 key 间等待（毫秒），不是实际睡眠时长。 */
+  schedKeyGapMs?: number;
+  /** 固定模式下**配置的**组间定时（毫秒）= 每组最低占用时长。 */
+  schedGroupGapMs?: number;
+  /**
+   * 本次 attempt **实际**等待了多少毫秒（组内 keyGap 或组间补时）。
+   *
+   * 与 `schedKeyGapMs` 对照：配置 1000 而实际 998 属正常抖动；实际恒为 0 说明
+   * 根本没走到等待分支（例如首把就成功，或走了别的分支）。
+   */
+  schedWaitMs?: number;
+  /** 本次是该组内的第几把 key（1 起）。用于验证「组内 1→2→3→4 顺序」。 */
+  schedStep?: number;
+  /** 组循环轮次（1 起；2026-11-02 新增）。全组耗尽后进第 2 轮，两轮全败才抛宿主。 */
+  schedRound?: number;
+  /** 视觉调用模式：`'bridge'`（拖图自动识别）/ `'tool'`（主模型调用视觉工具）/ `'chat'`（纯文本工具）。 */
+  visionMode?: string;
+  /** 视觉调用的具体任务（`image_reasoning` / `image_reasoning_multi` / `chat` / `bridge`）。 */
+  visionTask?: string;
   /**
    * 测试期诊断字段：错误体原文尾部（≤500 字符），供观察商汤真实返回结构；
    * P3 收敛时删除。**绝不含 key 原文**（错误体不落密钥的假设由 upstream 保证，若
@@ -220,6 +241,65 @@ interface GroupSchedulingConfig {
   recoverWindowMs?: number;
   /** 全池冷却时的快返 Retry-After（毫秒），默认 8_000（acquire_fail_fast=8 秒）。 */
   failFastMs?: number;
+  /**
+   * 调度模式：
+   * - `'adaptive'`（旧）：AIMD 组间隙，撞 429 就 ×1.5 放大。
+   * - `'fixed'`（2026-11-01 新增，默认）：用固定的 `groupGapMs` 做「组间定时」，
+   *   不再自适应。理由：AIMD 在「快拒零成本」的场景下会误判——它把网关层的
+   *   瞬间拒绝当成「需要降速」的信号，结果越撞越慢，而真正该做的是换把 key 再试。
+   */
+  mode?: 'adaptive' | 'fixed';
+  /**
+   * 「组间定时」（毫秒），默认 20_000。
+   *
+   * 语义：一轮组使用（从组内第一次发请求，到最后一次响应结束）至少占用这么久。
+   * 不足则记 `nextAvailableAt = usedStartedAt + groupGapMs`，该组在此期间不参与轮换。
+   * 目的：4 组轮一圈时，每个账户两次使用之间至少隔 `groupGapMs × (组数−1)`。
+   */
+  groupGapMs?: number;
+  /**
+   * 「key 间定时」（毫秒），默认 1_000。
+   *
+   * 语义：组内一把 key 返回 429 后，等这么久再发下一把。
+   * 目的：给刚撞墙的 key 一点喘息，同时控制单组的消耗速度。
+   */
+  keyGapMs?: number;
+  /**
+   * 429 轮次预算（2026-11-03）：走完几轮完整遍历仍全部 429 ⇒ 抛宿主。
+   *
+   * 语义：一轮 = max(各账户组数) 个宏观周期；每轮里每个账户按游标各走一步，
+   * 组间按 groupGapMs 让位。默认 2（4 账户 × 5 组 = 2 × 20 = 40 个宏观周期、
+   * 160 次尝试后抛宿主）。调大 = 在插件内多扛几轮、少让宿主退避；调小 = 更快
+   * 把 429 交给宿主。只影响 fixed 模式。
+   */
+  roundBudget?: number;
+  /**
+   * 分组形状（2026-11-02），默认 `'by-account'`。
+   *
+   * - `'by-account'`：一组 = 一个账户的全部 key（组内换 key 是同账户换凭据）。
+   *   实测（11-02 晨 22min）：每 key 压力更均匀（18-25 步），但同账户限流状态
+   *   共享 ⇒ 组内 2/3/4 把命中率低，1.07 次成功/分钟。
+   * - `'by-slot'`：组 i = 每个账户的第 i 把（组内换 key 即换账户）。
+   *   实测（同日 33min）：每步都在试探不同账户的恢复，1.55 次成功/分钟，
+   *   但单账户两次使用没有时间保底。
+   * 切换即时生效（seed 幂等，下次请求重建组）。
+   */
+  grouping?: 'by-account' | 'by-slot';
+  /**
+   * 每账户的组切分计划（设置页「账户与分组」写的 scheduling.groups）。
+   *
+   * 例：{ account: 1, sizes: [4,4,4,4,4] } ⇒ 账户 1 的 20 把切成 5 组、每组 4 把；
+   * gaps 长度 = sizes+1，表示每组前面/末尾有几个孤立 key（不进轮换）。
+   *
+   * 🔴 2026-11-03 修复：此前这个字段只存在于 schemastery schema，normalizeGroupScheduling
+   * 不认识它 ⇒ 解析时被丢掉，seedGroups 永远读不到计划、回落「每个账户一组」，
+   * 现场表现就是「界面明明分了 4 把一组，实际却按整账户 20 把连发」。
+   */
+  groups?: {
+    account: number;
+    sizes: number[];
+    gaps?: number[];
+  }[];
 }
 /** resolved 配置（缺省值全部补齐）。 */
 type ResolvedGroupScheduling = Required<GroupSchedulingConfig>;
@@ -227,6 +307,10 @@ type ResolvedGroupScheduling = Required<GroupSchedulingConfig>;
 interface KeyGroup {
   index: number;
   keys: readonly string[];
+  /** 所属账户 id（`account-1` 之类）；空串表示未标注（旧 seed 形态，每组合成一个账户）。 */
+  account: string;
+  /** 在该账户内的组序号（0 起）：第 r 次轮到该账户时用 `ordinal = 游标 % 组数`。 */
+  ordinal: number;
   /** 组冷却截止（epoch ms）；0 表示未在冷却。整组退避用。 */
   cooldownUntil: number;
   /** 组内累计 429 次数（成功清零，退避公式的 n）。 */
@@ -237,6 +321,24 @@ interface KeyGroup {
   lastKeyIndex: number;
   /** 账户级联动：accountId → 该账户在组内的冷却截止。 */
   accountCooldown: Map<string, number>;
+  /**
+   * 本组「本轮使用」的起始时刻（epoch ms）：组内第一次发请求时写入。
+   * 用于计算「组间定时」——从首次发请求到最后一次响应结束的耗时。
+   * 0 表示本组当前没有进行中的一轮。
+   */
+  usedStartedAt: number;
+  /**
+   * 本组下次可被使用的时刻（epoch ms）。
+   *
+   * 2026-11-01 新增（固定间隔调度）：一轮结束后置为
+   * `max(now, usedStartedAt + groupGapMs)`。这样即使一轮只花 3 秒，
+   * 该组也要等满 groupGapMs 才重新参与轮换，从而让「× (组数-1)」的
+   * 冷却时间真正落在别的组身上。
+   *
+   * 与 `cooldownUntil` 的区别：`cooldownUntil` 是「因为在限流而被迫退避」，
+   * 这个是「因为配额分摊而主动让位」。两者取 max 生效。
+   */
+  nextAvailableAt: number;
 }
 /** snapshot(): 对外只读快照的组列表。 */
 interface KeyGroupSnapshot extends KeyGroup {}
@@ -258,6 +360,15 @@ interface GroupRateLimitInput {
   /** 触发 429 的 key 原文。 */
   key: string;
   kind: 'tpm' | 'rpm' | 'rate' | 'quota_exhausted';
+}
+/** seed() 的组描述：显式给出账户与组号（新增形态）。 */
+interface SeedGroup {
+  /** 组内 key 列表（顺序即组内轮换顺序）。 */
+  keys: readonly string[];
+  /** 所属账户 id。 */
+  account: string;
+  /** 该账户内的组序号（0 起，连续）。 */
+  ordinal: number;
 }
 interface SensenovaGroupPoolDeps {
   /** 每操作读一次配置（改配置即生效，无需重建池）。 */
@@ -285,8 +396,25 @@ declare class SensenovaGroupPool {
   private readonly keyToAccount;
   /** 账户 id → 该账户全部 key。 */
   private readonly accountKeys;
-  /** 组游标（下一请求优先考虑的组；pickNext 环回推进）。 */
-  private cursor;
+  /**
+   * 账户轮转序（宏观序列，永不跳过、永不换序）。
+   *
+   * 2026-11-02 改：原先是「全局组游标」，序列由组的排列顺序决定；现在宏观单位是
+   * **账户**，组只是账户被轮到时才决定的「微观」选择。于是：
+   *   - `accountOrder` 是账户的固定循环序；
+   *   - `accountCursor` 指向**下一个**要轮到的账户；
+   *   - `groupCursor` 是每个账户**各自**的组游标，轮到它并被真正用到时才 +1。
+   *
+   * 这样 4 账户 × 1 组 ⇒ 1→2→3→4（与改造前一致）；1 账户 × 3 组 ⇒ 1→1′→1″；
+   * 3 账户 3/1/2 组 ⇒ 1→2→3→1′→2→3′→1″…（只有 1 组的账户每轮都用同一组，不跳过）。
+   */
+  private accountOrder;
+  /** 下一个要轮到的账户在 accountOrder 中的下标。 */
+  private accountCursor;
+  /** 账户 → 该账户「下一次该用第几组」（对组数取模）。 */
+  private readonly groupCursor;
+  /** 账户 → 该账户的组下标列表（按 ordinal 升序）。 */
+  private readonly ordinalsByAccount;
   constructor(deps: SensenovaGroupPoolDeps);
   /** 当前生效配置的只读视图（供外部同源读取 gap 初值等）。 */
   get config(): ResolvedGroupScheduling;
@@ -297,19 +425,81 @@ declare class SensenovaGroupPool {
    * @param accountOf - key → 账户 id；同一账户的 key 分属不同组时，联动冷却会把
    *   它们各自所在的组**全部**冷却（账号级联动的实现基础）。
    */
-  seed(groups: readonly (readonly string[])[], accountOf?: (key: string) => string | undefined): string[];
+  seed(groups: readonly (readonly string[] | SeedGroup)[], accountOf?: (key: string) => string | undefined): string[];
   /** 组数。 */
   get size(): number;
+  /** 当前宏观轮转指向的账户（下一次轮到谁）。 */
+  nextAccount(): string | undefined;
+  /** 账户轮转序只读副本（日志 / 测试用）。 */
+  get accounts(): readonly string[];
+  /** 各账户组数的最大值：一轮 = 该值个宏观周期（走遍全部组算 1 轮）。 */
+  maxGroupCount(): number;
+  /** 某账户当前该用的组下标（不推进游标）。 */
+  currentGroupOf(account: string): number | undefined;
   /**
-   * 选中「下一把可用 key」：从游标开始环回。
-   *   - pickStart（并发交错）：停留在当前组，组内轮转取可用 key；
-   *   - pickNext（轮换语义）：跳到下一可用组落位；
-   *   两组都会跳过「整组冷却且无在途」的组与「账户级冷却」的 key；
-   *   全池无可用 key → undefined（调用方走 fail-fast 快返路径）。
+   * 走一步宏观轮转（2026-11-02）：**宏观单位是账户，不是组**。
+   *
+   * 序列：账户按 accountOrder 固定循环，永不跳过、永不换序；微观：轮到某账户时
+   * 用它的「当前组」= groupCursor[account] % 该账户组数。
+   *
+   * 该账户当前组此刻不可用（冷却 / 组间定时窗口 / 组内 key 全被 exclude 或账户级冷却）时，
+   * 只让出这一次轮到的机会，**不推进它的组游标**，继续看下一个账户 —— 账户始终留在轮转序里，
+   * 同账户的最短间隔（A−1 步）不被压缩；转满一圈仍无可用 ⇒ undefined（调用方等待或 fail-fast）。
+   *
+   * 组游标只在「这一组真的给出了 key」时前进，保证每组每轮只被用一次。
    */
+  step(exclude?: ReadonlySet<string>): {
+    groupIndex: number;
+    key: string;
+  } | undefined;
+  /** 请求入口取 key（走一步轮转）。 */
   pickStart(exclude?: ReadonlySet<string>): string | undefined;
-  /** 推进组游标到下一可用组（轮换到下一组，避免同一账户连续撞 429 空转）。 */
+  /** 429 后换一组再试（同一步轮转，天然落到下一个账户）。 */
   pickNext(exclude?: ReadonlySet<string>): string | undefined;
+  /** 429 后换组：同时给出组号与 key（adapter 固定间隔路径用）。 */
+  pickNextSlot(exclude?: ReadonlySet<string>): {
+    groupIndex: number;
+    key: string;
+  } | undefined;
+  /**
+   * 组内按 **keys 数组顺序**（即 slot 1→2→3→4）取第一把可用的 key。
+   *
+   * 与 `pickStart` 的「从 lastKeyIndex 轮转」不同：这里是从头顺序遍历，
+   * 但会把**最后试到的下标**写回 `lastKeyIndex`。这样本组耗尽后，下一次
+   * `pickStart`/`step` 从下一把起手又正好回到 slot 1，不会在第二轮把
+   * 入口顺序变成 2→1→3→4。语义是「一轮之内按编号逐个试，下一轮仍从 1 开始」。
+   *
+   * @param groupIndex 组下标
+   * @param exclude 本轮已试过的 key（不会被再次返回）
+   * @returns undefined = 本组在本轮已无可用 key
+   */
+  pickWithinGroup(groupIndex: number, exclude?: ReadonlySet<string>): string | undefined;
+  /** 开始一轮组使用：记录起始时刻（已有进行中的一轮则不覆盖）。 */
+  beginGroup(groupIndex: number): void;
+  /**
+   * 结束一轮组使用：置 `nextAvailableAt = max(now, usedStartedAt + gapMs)`。
+   *
+   * 这就是「组间定时」的实现 —— 一轮只花了 3 秒也要补到 gapMs，
+   * 从而保证「轮回到本组」时已经过了 gapMs ×（组数−1）。
+   *
+   * @returns 实际补齐后的下次可用时刻
+   */
+  finishGroup(groupIndex: number, gapMs: number): number;
+  /**
+   * 按账户轮转序「窥视」下一个可用组（不推进任何游标）。
+   *
+   * 用于日志 / 诊断：真正取 key 走 step()（会推进游标）。
+   *
+   * @returns 组下标；undefined = 所有组都还没到点
+   */
+  pickAvailableGroup(now?: number): number | undefined;
+  /**
+   * 距离「最早有一组可用」还要多久（毫秒）。
+   *
+   * 用于把所有组都试完后给宿主一个准确的 pra —— 不再拍脑袋固定 20s，
+   * 而是「最早那个组的 nextAvailableAt 减现在」。
+   */
+  earliestAvailableIn(now?: number): number;
   /**
    * 查询某 key 的组上下文（adapter 日志与全池冷却快返判定用）。
    *
@@ -566,6 +756,16 @@ interface SensenovaAdapterDeps {
     label: string;
     ref: string;
   } | undefined;
+  /**
+   * 实时 key 事件（2026-11-03）：把「这一把 key 开始发请求 / 撞了 429」交给宿主，
+   * 由设置页的 key 网格按真实节奏闪绿/红（与「演示红/绿」共用同一套动画）。
+   *
+   * 可选：未注入（单测、无 UI 的 profile）时静默，不影响请求路径。
+   */
+  onKeyEvent?: (event: {
+    key: string;
+    kind: 'start' | 'rate-limit';
+  }) => void;
   fetchImpl?: typeof fetch;
   /** 每 key 并发闸；缺省为进程内实例（可注入以利测试）。 */
   concurrencyGate?: KeyedConcurrencyGate;
@@ -830,6 +1030,29 @@ declare class SensenovaKeyPool {
   private detach;
 }
 //#endregion
+//#region src/vision/config.d.ts
+/** 视觉辅助配置（schema 输出形状，全部可选）。 */
+interface VisionConfig {
+  /** 总开关：关掉后工具与读图桥都不工作（工具仍注册，但直接返回禁用错误）。 */
+  enabled?: boolean;
+  /** 视觉模型链（逗号分隔，故障转移顺序）。 */
+  modelChain?: string;
+  /** 单次视觉请求超时（毫秒）。 */
+  timeoutMs?: number;
+  /** 全局静默读图桥模式。 */
+  bridgeMode?: 'off' | 'on' | 'auto';
+  /** 视觉观察提示（空 = 默认提示）。 */
+  bridgePrompt?: string;
+}
+/** 解析后的视觉运行事实（全字段都有值，供请求路径直接读）。 */
+interface ResolvedVisionOptions {
+  enabled: boolean;
+  modelChain: string[];
+  timeoutMs: number;
+  bridgeMode: 'off' | 'on' | 'auto';
+  bridgePrompt: string;
+}
+//#endregion
 //#region src/index.d.ts
 export declare const name = "llm-sensenova";
 export declare const inject: string[];
@@ -922,6 +1145,14 @@ export interface SensenovaConfig {
    * 账户 label 不符合「账户-序号」约定时（无法划分组）同样自动回落。
    */
   scheduling?: GroupSchedulingConfig;
+  /**
+   * 视觉辅助（融合自 dsh-sensenova-vision-aid）。
+   *
+   * 开启后：三个工具（describe_image / describe_images / chat）可用，且纯文本
+   * 主模型拖图会被自动转成视觉观察文本。所有视觉请求与主对话**共用**同一套
+   * key 池、并发闸、组退避与运行日志 —— 这正是「视觉不再另起一套轮换」的落点。
+   */
+  vision?: VisionConfig;
 }
 /**
  * 对外导出的配置 schema。
@@ -1017,6 +1248,8 @@ export interface ResolvedSensenovaOptions {
   requestParams: SensenovaRequestParams;
   /** 已归一化的组调度配置（v0.5 P1；enabled=false 时组池不启用）。 */
   scheduling: GroupSchedulingConfig;
+  /** 已归一化的视觉辅助配置（融合自 vision-aid，永不为 undefined）。 */
+  vision: ResolvedVisionOptions;
   modelSelection?: ModelSelection;
 }
 /** 把配置的并发上限归一化为正整数（非正整数/无法解析回退 1）。 */
@@ -1061,8 +1294,23 @@ export declare function apply(ctx: Context, config: SensenovaConfig): void;
 export declare const PROBE_MODEL = "deepseek-flash";
 /** 单次探测的超时（毫秒）。故意短于生产建连超时：探测要的是快速结论，不是结果本身。 */
 export declare const PROBE_TIMEOUT_MS = 10000;
-/** 探测定时器的粒度（毫秒）。取 5s 以尊重最短 15s 的探测间隔。 */
-export declare const PROBE_TICK_MS = 3000;
+/**
+ * 探测定时器的粒度（毫秒）。
+ *
+ * 2026-11-01：3_000 → 120_000（方案文档 §1.7 的 P0）。
+ *
+ * 原值 3s 意味着每个进程每小时最多跑 1,200 次探测。在 4 账户场景下这些探测
+ * **本身就是限流的主要贡献者之一**——11-01 实测「DSH 已静默 56 分钟，deepseek
+ * 仍然 429」，根因就是这条定时器在持续打 `deepseek-flash`。
+ *
+ * 为什么是 120s：实测「静默 10 分钟后单个 6 token 请求仍被拒」，恢复的真实
+ * 时间尺度是分钟到小时级，不是秒级。3s 探测在这一尺度下纯属噪声，且每次探测
+ * 都在给网关的「连续 429」计数 +1。120s 兼顾「及时发现恢复」与「不制造流量」。
+ *
+ * 注意：这里只调粒度，真正的退避仍由 key 池的 `probeInitialMs × factor^n` 决定，
+ * 两者叠加后实际间隔 ≥ 120s。
+ */
+export declare const PROBE_TICK_MS = 600000;
 export interface ProbeSchedulerDeps {
   /** 池：取阻塞态条目并回写探测结果。 */
   keyPool: SensenovaKeyPool;
