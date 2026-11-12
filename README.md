@@ -8,7 +8,7 @@ dsh-sensenova-freeapi 是一个非官方的 **DeepSeek Harness**（DSH）LLM 提
   <img src="./docs/lockup.png" alt="DeepSeek Harness × SenseNova" width="720">
 </p>
 
-![release](https://img.shields.io/badge/status-0.5.0-3fb950)
+![release](https://img.shields.io/badge/status-0.5.1-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 ---
@@ -39,13 +39,13 @@ https://github.com/modesthub/dsh-sensenova-freeapi
 ```
 
 3. 确认安装，然后**重启 DSH** 使插件生效
-4. 安装后可在**插件详情页**看到当前版本号（本 README 对应 **v0.5.0**）
+4. 安装后可在**插件详情页**看到当前版本号（本 README 对应 **v0.5.1**）
 
 ### 更新到最新版
 
 - 在插件安装界面**重新输入同一个地址**（或先卸载再安装）即可拉取最新代码
 - 更新后**重启 DSH**，插件详情页的版本号会随之变化 —— 这是确认是否更新成功最直接的方式
-- 想固定到某个版本，可在地址后追加 tag，例如 `https://github.com/modesthub/dsh-sensenova-freeapi#v0.5.0`
+- 想固定到某个版本，可在地址后追加 tag，例如 `https://github.com/modesthub/dsh-sensenova-freeapi#v0.5.1`
 
 ### 命令行安装（备选）
 
@@ -378,7 +378,7 @@ pnpm test         # node --import tsx --test tests/**/*.test.ts
 - 🐛 **v0.2.8**：`quotaRotation` 默认改开启 + 429 无条件上报池状态（修「80 账户卡 Default」）。
 - 🎛️ **v0.2.9**：接通 `connectRetry` 配置入口（429 原地等待终于可关）。
 - 🚀 **v0.5.0**：**轮换机制重做** —— 按账户循环 + 每账户 4 把一组 + 组间定时冷却，取代运行态/阻塞态双列表状态机；全新控制台面板（key 网格拖拽分组、智能分组、智能组间定时、演示红/绿、429 轮次预算）；**视觉辅助融合**（三工具 + 拖图桥，共用 key 池）；实时请求闪灯；密钥导入导出重构。
-- 🔧 **v0.5.0+**：接入 `sensenova-6.8-flash` 与 `glm-5.3`（思考常开，档位仅 low/high/max）；`glm-5.2` 与 `deepseek-v4-flash` 保留登记（下线不删，等版本迭代清理）。
+- 🔧 **v0.5.1**：接入 `sensenova-6.8-flash` 与 `glm-5.3`（思考常开，档位仅 low/high/max）；`glm-5.2` 与 `deepseek-v4-flash` 保留登记（下线不删，等版本迭代清理）。README 全面重写（新轮换机制 / 控制台面板 / 视觉融合 / AIMD 警告 / 取消模型推荐），删除双列表状态机图。
 
 ---
 

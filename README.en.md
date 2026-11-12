@@ -8,7 +8,7 @@ dsh-sensenova-freeapi is an unofficial **DeepSeek Harness** (DSH) LLM provider p
   <img src="./docs/lockup.png" alt="DeepSeek Harness × SenseNova" width="720">
 </p>
 
-![release](https://img.shields.io/badge/status-0.5.0-3fb950)
+![release](https://img.shields.io/badge/status-0.5.1-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 ---
@@ -39,13 +39,13 @@ https://github.com/modesthub/dsh-sensenova-freeapi
 ```
 
 3. Confirm, then **restart DSH**
-4. The **plugin detail page** shows the installed version (this README ships with **v0.5.0**)
+4. The **plugin detail page** shows the installed version (this README ships with **v0.5.1**)
 
 ### Updating
 
 - Re-enter the same URL in the plugin install dialog (or uninstall and reinstall)
 - **Restart DSH** afterwards; the version number on the plugin detail page is the simplest confirmation
-- To pin a version, append a tag: `https://github.com/modesthub/dsh-sensenova-freeapi#v0.5.0`
+- To pin a version, append a tag: `https://github.com/modesthub/dsh-sensenova-freeapi#v0.5.1`
 
 ### Command line (alternative)
 
@@ -378,7 +378,7 @@ Oldest → newest.
 - 🐛 **v0.2.8**: `quotaRotation` defaults to on + unconditional pool-state reporting on 429 (fixes "80 accounts stuck on Default").
 - 🎛️ **v0.2.9**: wired the `connectRetry` config entry (in-place 429 wait can finally be turned off).
 - 🚀 **v0.5.0**: **rotation rewritten** — account-by-account cycling with 4 keys per group plus group pacing, replacing the running/blocked dual-list state machine; brand-new console panel (draggable key grid, Smart group, Smart group gap, Preview, 429 round budget); **vision aid merged** (three tools + drag bridge, sharing the key pool); live request flashing; key import/export reworked.
-- 🔧 **v0.5.0+**: added `sensenova-6.8-flash` and `glm-5.3` (thinking always on, efforts limited to low/high/max); `glm-5.2` and `deepseek-v4-flash` stay registered (retired models are kept until a later cleanup).
+- 🔧 **v0.5.1**: added `sensenova-6.8-flash` and `glm-5.3` (thinking always on, efforts limited to low/high/max); `glm-5.2` and `deepseek-v4-flash` stay registered (retired models are kept until a later cleanup). Full README rewrite (new rotation / console panel / merged vision / AIMD warning / no model recommendations) and removal of the dual-list state-machine diagram.
 
 ---
 
