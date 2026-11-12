@@ -687,7 +687,7 @@ interface SensenovaRequestParams {
   presencePenalty?: number;
   /** 随机种子（Beta）。 */
   seed?: number;
-  /** 仅 glm-5.2：`false` 时忽略 temperature/top_p，输出更稳定（适合代码/翻译）。 */
+  /** 仅 GLM 系（5.2 / 5.3）：`false` 时忽略 temperature/top_p，输出更稳定（适合代码/翻译）。 */
   doSample?: boolean;
 }
 /** 0.1.5 的每请求图片预算形状（`ImageRequestPolicy`：像素总量 + 编码字节目标）。 */

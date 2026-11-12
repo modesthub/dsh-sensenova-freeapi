@@ -82,7 +82,9 @@ export const MODEL_PARAM_SPECS: readonly ModelParamSpec[] = [
   { key: 'presence_penalty', label: '存在惩罚', range: '[-2, 2]', serverDefault: '0', hostSupport: 'no', l2: true, note: '🔴【实测】kimi-k3 传非 0 直接 400。思考模式下不生效。' },
   { key: 'seed', label: '随机种子', range: '[0, 9999999)', serverDefault: '—', hostSupport: 'no', l2: true, note: 'Beta；接受性 5/5 通过（kimi-k3 已整体排除，见模型表）。' },
   { key: 'repetition_penalty', label: '重复惩罚', range: '[1, 2]', serverDefault: '—', hostSupport: 'no', l2: false, note: '【文档 2026-11-03】6.8-flash 新增参数，尚未实测；宿主 GenerateOptions 无对应字段 ⇒ 不提供 L2 注入。' },
-  { key: 'do_sample', label: '是否采样（glm 独有）', range: 'boolean', serverDefault: 'true', hostSupport: 'no', l2: true, note: '仅 glm-5.2。false 时忽略 temperature/top_p，输出更稳定（适合代码/翻译）。' },
+  { key: 'do_sample', label: '是否采样（glm 独有）', range: 'boolean', serverDefault: 'true', hostSupport: 'no', l2: true, note: '仅 GLM 系（5.2 / 5.3）。false 时忽略 temperature/top_p，输出更稳定（适合代码/翻译）。' },
+  { key: 'thinking.clear_thinking', label: '跨轮保留思维链（GLM-5.3）', range: 'boolean', serverDefault: 'true', hostSupport: 'no', l2: false, note: '【文档 2026-11-12】true=忽略历史 reasoning_content；false 时必须完整、未修改、顺序不变地回传历史思维链。插件不发送本参数（保持服务端默认 true）。' },
+  { key: 'tool_stream', label: '流式返回工具参数（GLM-5.3）', range: 'boolean', serverDefault: 'false', hostSupport: 'no', l2: false, note: '【文档】须同时 stream: true。插件恒发 stream: true，但未开 tool_stream（保持默认非流式参数，避免改变既有解析路径）。' },
   { key: 'response_format', label: '结构化输出', range: '{type: text/json_object}', serverDefault: 'text', hostSupport: 'no', l2: false, note: '【实测】json_object 5/5 可用。⚠️ 未纳入 L2：对 DSH 的 agent 对话没有意义，且是 v4「三方组合 400」的参与者。lite 的 JSON 输出会包在 ```json 围栏里。' },
   { key: 'n', label: '生成候选数', range: '[1, 5]', serverDefault: '1', hostSupport: 'no', l2: false, note: '🔴【实测】v4/v4.1/kimi 上 n>1 被**静默降到 1**，只在 lite 真生效；且是 v4「三方组合 400」的参与者。⇒ 不提供。' },
   { key: 'parallel_tool_calls', label: '并行工具调用', range: 'boolean', serverDefault: 'true', hostSupport: 'no', l2: false, note: '【实测】v4 上与 n/response_format 同传会 400。未纳入 L2。' },
@@ -148,6 +150,16 @@ const NOTES_GLM = [
   '独有 `do_sample` 参数（false 时输出更稳定，适合代码/翻译）。',
 ];
 
+const NOTES_GLM53 = [
+  '【文档 2026-11-12】智谱新一代旗舰：强化编程/软件工程与代码安全分析，1M 上下文；面向复杂软件工程、长程执行与多步骤 Agent。',
+  '🔴【文档】思考**常开**：thinking.type 只接受 enabled（传 disabled 请求失败）⇒ 档位无 none。',
+  '🔴【文档】reasoning_effort **只接受 low / high / max**（默认 max）；Coding 用 max。',
+  '【文档】无视觉能力（使用限制：输入模态仅支持文本）⇒ 纯文本模型。',
+  '【文档】响应思考字段是 `reasoning_content`（旧 5.2 是 `reasoning`）；插件按两者都读，无需改动。',
+  '【文档】do_sample=false 时忽略 temperature/top_p（代码/翻译推荐）；temperature [0,1]、top_p [0.01,1]、max_tokens [1,131072]。',
+  '【文档】工具：仅 function，单次最多 128 个；流式工具调用需 stream+tool_stream 同时为 true。跨轮保留思维链需 thinking.clear_thinking=false 且原样回传 reasoning_content。',
+];
+
 const NOTES_KIMI = [
   '视觉实测通过：准确读出测试图中的红方块 / 蓝圆 / 数字 42。',
   '🔴 图片输入**只吃 Base64**（不吃公网 URL），且 `content` 必须是对象数组 —— 插件已统一发 data URL，天然兼容。',
@@ -202,6 +214,17 @@ export const MODEL_FACT_SHEETS: readonly ModelFactSheet[] = [
     efforts: ['none', 'low', 'high', 'max'],
     blockedL2Params: [],
     notes: NOTES_V41,
+  },
+  {
+    id: 'glm-5.3',
+    displayName: 'GLM-5.3',
+    contextWindow: MODEL_CONTEXT_OVERRIDES.get('glm-5.3') ?? 1_048_576,
+    maxOutputTokens: MODEL_MAX_OUTPUT_OVERRIDES.get('glm-5.3') ?? 131_072,
+    vision: false,
+    textOnlyBehavior: 'refuses',
+    efforts: ['low', 'high', 'max'],
+    blockedL2Params: ['frequency_penalty', 'presence_penalty', 'seed'],
+    notes: NOTES_GLM53,
   },
   {
     id: 'glm-5.2',

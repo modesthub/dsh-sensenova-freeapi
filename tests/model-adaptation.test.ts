@@ -16,6 +16,7 @@ import {
   MODEL_MAX_OUTPUT_OVERRIDES,
   DOCUMENTED_VISION_MODELS,
   DOCUMENTED_TEXT_ONLY_MODELS,
+  KNOWN_EFFORTS,
   KNOWN_UNROUTABLE_MODELS,
   buildOpenAiBody,
   l2ParamsFor,
@@ -28,6 +29,8 @@ const ALL_MODELS = [
   'sensenova-6.8-flash',
   'deepseek-v4-flash',
   'deepseek-flash',
+  // 2026-11-12 新增（DIFF-vs-20261103.md）：GLM-5.2 → GLM-5.3（旧的 5.2 保留登记）。
+  'glm-5.3',
   'glm-5.2',
   'kimi-k3',
 ];
@@ -107,19 +110,25 @@ test('视觉白名单：四个视觉模型在列，两个纯文本模型不在�
   for (const id of ['sensenova-6.8-flash-lite', 'sensenova-6.8-flash', 'deepseek-flash', 'kimi-k3']) {
     assert.ok(DOCUMENTED_VISION_MODELS.has(id), id);
   }
-  for (const id of ['deepseek-v4-flash', 'glm-5.2']) {
+  for (const id of ['deepseek-v4-flash', 'glm-5.2', 'glm-5.3']) {
     assert.equal(DOCUMENTED_VISION_MODELS.has(id), false, id);
     assert.ok(DOCUMENTED_TEXT_ONLY_MODELS.has(id), `${id} 应在纯文本清单里（供面板警示）`);
   }
 });
 
-test('输出预算表：min(服务端上限, 131072)，6 个模型全覆盖', () => {
+test('输出预算表：min(服务端上限, 131072)，7 个模型全覆盖', () => {
   assert.equal(MODEL_MAX_OUTPUT_OVERRIDES.get('sensenova-6.8-flash-lite'), 65_536);
-  for (const id of ['sensenova-6.8-flash', 'deepseek-v4-flash', 'deepseek-flash', 'glm-5.2', 'kimi-k3']) {
+  for (const id of ['sensenova-6.8-flash', 'deepseek-v4-flash', 'deepseek-flash', 'glm-5.3', 'glm-5.2', 'kimi-k3']) {
     assert.equal(MODEL_MAX_OUTPUT_OVERRIDES.get(id), 131_072, id);
   }
   assert.equal(MODEL_CONTEXT_OVERRIDES.get('sensenova-6.8-flash-lite'), 262_144, 'lite 上下文不是 1M');
   assert.equal(MODEL_CONTEXT_OVERRIDES.get('sensenova-6.8-flash'), 1_048_576, '6.8-flash 上下文 1M');
+});
+
+test('GLM-5.3 档位只有 low/high/max（文档：思考常开、reasoning_effort 仅三档）', () => {
+  assert.deepEqual(KNOWN_EFFORTS.get('glm-5.3'), ['low', 'high', 'max']);
+  // 旧的 GLM-5.2 保持七档登记（下线不删，等版本迭代再清）。
+  assert.equal(KNOWN_EFFORTS.get('glm-5.2')?.length, 7);
 });
 
 test('不可路由清单包含 403 诱饵 id deepseek-v4.1-flash', () => {

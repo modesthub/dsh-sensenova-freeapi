@@ -216,6 +216,9 @@ const DISPLAY_NAME_OVERRIDES: ReadonlyMap<string, string> = new Map([
   ['deepseek-v4-flash', 'DeepSeek V4 Flash'],
   ['deepseek-flash', 'DeepSeek V4.1 Flash'],
   ['deepseek-v4-pro', 'DeepSeek V4 Pro'],
+  // 2026-11-12（DIFF-vs-20261103.md）：GLM-5.2 换代 GLM-5.3。旧的 5.2 条目保留 ——
+  // 用户明确「下线的就不理了，照常登记，后续版本迭代时再删」，避免历史配置报错。
+  ['glm-5.3', 'GLM-5.3'],
   ['glm-5.2', 'GLM-5.2'],
   ['kimi-k3', 'Kimi K3'],
 ]);
@@ -260,6 +263,10 @@ export const KNOWN_EFFORTS: ReadonlyMap<string, readonly string[]> = new Map([
   ['deepseek-v4-flash', ['none', 'low', 'medium', 'high', 'xhigh']],
   ['deepseek-flash', ['none', 'low', 'high', 'max']],
   ['deepseek-v4-pro', ['low', 'high', 'max']],
+  // GLM-5.3（2026-11-12 新增）：文档原文「思考始终开启，thinking.type 只接受 enabled，
+  // 传 disabled 请求会失败」，reasoning_effort **只接受 low / high / max**（默认 max）。
+  // ⇒ 不给 none / minimal / medium / xhigh —— 发了会被服务端拒绝或静默无效。
+  ['glm-5.3', ['low', 'high', 'max']],
   ['glm-5.2', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']],
   ['kimi-k3', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']],
 ]);
@@ -388,7 +395,9 @@ export const DOCUMENTED_VISION_MODELS = new Set(['kimi-k3', 'sensenova-6.8-flash
  * 本表**不参与能力上报**（不改变 `inputModalities`，那些模型仍是 `['text']`），
  * 仅供设置页「当前模型」面板显示警示文案，避免用户贴图后拿到幻觉答案却毫无报错。
  */
-export const DOCUMENTED_TEXT_ONLY_MODELS = new Set(['deepseek-v4-flash', 'glm-5.2']);
+// 2026-11-12：GLM-5.3 文档「使用限制 → 输入模态：仅支持文本」⇒ 与 5.2 同属纯文本。
+// 收图行为未经实测，暂按 5.2 的「诚实拒答」登记（比 hallucinates 安全）。
+export const DOCUMENTED_TEXT_ONLY_MODELS = new Set(['deepseek-v4-flash', 'glm-5.2', 'glm-5.3']);
 
 /**
  * 模型级输出预算覆盖（token）。
@@ -422,6 +431,9 @@ export const MODEL_MAX_OUTPUT_OVERRIDES: ReadonlyMap<string, number> = new Map([
   ['sensenova-6.8-flash', 131_072],
   ['deepseek-v4-flash', 131_072],
   ['deepseek-flash', 131_072],
+  // GLM-5.3（2026-11-12）：文档 max_tokens 默认 65536、范围 [1, 131072] ⇒
+  // min(131072, 131072) = 131072（思考与回答共享配额，给足）。
+  ['glm-5.3', 131_072],
   ['glm-5.2', 131_072],
   ['kimi-k3', 131_072],
 ]);
@@ -443,6 +455,8 @@ export const MODEL_CONTEXT_OVERRIDES: ReadonlyMap<string, number> = new Map([
   ['sensenova-6.8-flash', 1_048_576],
   ['deepseek-v4-flash', 1_048_576],
   ['deepseek-flash', 1_048_576],
+  // GLM-5.3（2026-11-12）：文档「上下文长度最高支持 1M Tokens」。
+  ['glm-5.3', 1_048_576],
   ['glm-5.2', 1_048_576],
   ['kimi-k3', 1_048_576],
 ]);
@@ -486,6 +500,10 @@ export const MODEL_L2_PARAM_SUPPORT: ReadonlyMap<string, ReadonlySet<SensenovaRe
   ['sensenova-6.8-flash', new Set<SensenovaRequestParamKey>(['top_p', 'frequency_penalty', 'presence_penalty', 'seed'])],
   ['deepseek-v4-flash', new Set<SensenovaRequestParamKey>(['top_p', 'frequency_penalty', 'presence_penalty', 'seed'])],
   ['deepseek-flash', new Set<SensenovaRequestParamKey>(['top_p', 'frequency_penalty', 'presence_penalty', 'seed'])],
+  // GLM-5.3（2026-11-12）：文档「请求参数」表只列 top_p / temperature / do_sample，
+  // **没有** frequency_penalty / presence_penalty / seed ⇒ 按「文档没写就不注入」收敛，
+  // 免得多发未知字段吃 400（与 kimi-k3 全部排除同一思路）。
+  ['glm-5.3', new Set<SensenovaRequestParamKey>(['top_p', 'do_sample'])],
   ['glm-5.2', new Set<SensenovaRequestParamKey>(['top_p', 'frequency_penalty', 'presence_penalty', 'seed', 'do_sample'])],
   ['kimi-k3', new Set<SensenovaRequestParamKey>()],
 ]);
@@ -500,7 +518,7 @@ export interface SensenovaRequestParams {
   presencePenalty?: number;
   /** 随机种子（Beta）。 */
   seed?: number;
-  /** 仅 glm-5.2：`false` 时忽略 temperature/top_p，输出更稳定（适合代码/翻译）。 */
+  /** 仅 GLM 系（5.2 / 5.3）：`false` 时忽略 temperature/top_p，输出更稳定（适合代码/翻译）。 */
   doSample?: boolean;
 }
 
@@ -1001,7 +1019,7 @@ function catalogExcludesReasoning(raw: Record<string, unknown>): boolean {
  */
 export const EFFORT_LABELS: ReadonlyMap<string, { name: string; description: string }> = new Map([
   ['none', { name: 'Off', description: '关闭思考通道，直接作答。适合简单问答、内容提取、格式转换，延迟最低。' }],
-  ['minimal', { name: 'Minimal', description: '最轻量思考。glm-5.2 / kimi-k3 / v4.1 / 6.8-flash（后两者文档口径）接受。' }],
+  ['minimal', { name: 'Minimal', description: '最轻量思考。glm-5.2 / kimi-k3 / v4.1 / 6.8-flash 接受；GLM-5.3 不接受（只有 low/high/max）。' }],
   ['low', { name: 'Low', description: '轻度推理，延迟与 token 消耗较低。适合简单任务与延迟敏感场景。' }],
   ['medium', { name: 'Medium', description: '中等推理，在速度与效果之间平衡。适合一般分析与内容生成。' }],
   ['high', { name: 'High', description: '增强推理，多数模型的服务端默认档。适合常规推理、代码生成。' }],
