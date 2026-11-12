@@ -2,20 +2,28 @@
 
 [简体中文](./README.md) ｜ **English**
 
-dsh-sensenova-freeapi is an unofficial **DeepSeek Harness** (DSH) LLM provider plugin. Built on the **everything-is-a-plugin** architecture, it registers the `sensenova` provider route to connect to **SenseNova** (an OpenAI-compatible API). It ships with **multi-account API-key rotation**, a **running/blocked dual-list state machine**, a live model catalog, and a Models-page settings panel, turning channel rate-limit spam into a stable service.
+dsh-sensenova-freeapi is an unofficial **DeepSeek Harness** (DSH) LLM provider plugin. It registers the `sensenova` provider route via the **everything-is-a-plugin** architecture and talks to **SenseNova** (OpenAI-compatible API). It turns provider rate limits from "an error storm" into "a predictable rhythm": **account-by-account rotation, 4 keys per group probed in order, then a group pacing window** — plus a **visual console** so you can see the rhythm and tune it yourself.
 
 <p align="center">
   <img src="./docs/lockup.png" alt="DeepSeek Harness × SenseNova" width="720">
 </p>
 
-![release](https://img.shields.io/badge/status-0.2.8-3fb950)
+![release](https://img.shields.io/badge/status-0.5.0-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
-> ⚠️ **If the plugin fails to install**: enter DSH through **plugin-less mode**, then repair it with **Da Fei Yu (大肥鱼)** — it costs at most **¥0.5**.
+---
 
-> ⭐ **Testing and building this took real effort — if it helps you, please give the repo a Star. Thank you!**
+## What changed in v0.5
 
-> Reference implementation: [`@mars-sea/dsh-commandcode-provider`](https://github.com/Mars-Sea/dsh-commandcode-provider) (MIT). This plugin keeps only the multi-account connectivity; the login flow, usage dashboard, plan window, and CLI tooling are all trimmed away.
+If you used an older version, these are the only things you need to know:
+
+| Change | Details |
+|---|---|
+| 🔄 **Rotation rewritten** | The old "running / blocked dual-list + probe revival" state machine is gone. It is now **account-by-account rotation**: each turn probes only **4 keys of one account**, then hands over via the **group pacing window** — preventing 424 at the source. |
+| 🎛️ **New console panel** | Visual key grid: drag group edges, inspect rotation order, one-click **Smart group**, one-click **Smart group gap**, plus a **Preview** that plays two rounds fast. |
+| 👁️ **Vision aid merged in** | No separate plugin needed anymore (and no more two schedulers fighting over the same keys). Three vision tools + drag-and-drop auto-recognition ship in this plugin, individually switchable. |
+| ⚠️ **AIMD not finished** | Use **fixed pacing only**. The AIMD hydration logic is still incomplete — do not use it, do not enable it yourself. |
+| 📉 **Model recommendations removed** | Model performance swings hard **by time of day**, so a recommendation table is misleading. Instead you are taught how to **tune the group gap yourself** with the panel. |
 
 ---
 
@@ -23,35 +31,31 @@ dsh-sensenova-freeapi is an unofficial **DeepSeek Harness** (DSH) LLM provider p
 
 ### Via the DSH plugin UI (recommended)
 
-1. Open the DSH **plugin installation** screen
-2. Paste this address into the install input:
+1. Open DSH → **Plugins** in the left sidebar → **Add plugin**
+2. Paste the repository URL:
 
 ```
 https://github.com/modesthub/dsh-sensenova-freeapi
 ```
 
-3. Confirm the install, then **restart DSH** so the plugin takes effect
-4. The **plugin detail page** shows the installed version (this README ships with **v0.2.7**)
+3. Confirm, then **restart DSH**
+4. The **plugin detail page** shows the installed version (this README ships with **v0.5.0**)
 
 ### Updating
 
-- Paste the **same address again** in the install screen (or uninstall and reinstall) to pull the latest code
-- **Restart DSH** afterwards; the version shown on the plugin detail page changes — the simplest way to confirm the update landed
-- To pin a version, append a tag: `https://github.com/modesthub/dsh-sensenova-freeapi#v0.2.7`
+- Re-enter the same URL in the plugin install dialog (or uninstall and reinstall)
+- **Restart DSH** afterwards; the version number on the plugin detail page is the simplest confirmation
+- To pin a version, append a tag: `https://github.com/modesthub/dsh-sensenova-freeapi#v0.5.0`
 
 ### Command line (alternative)
 
 ```bash
 # GitHub (recommended; lib/ is prebuilt, no build step needed)
-dsh plugin --profile <name> add github:modesthub/dsh-sensenova-freeapi
+dsh plugin --profile desktop add https://github.com/modesthub/dsh-sensenova-freeapi
 
 # Local path (for plugin development)
-dsh plugin --profile <name> add /path/to/dsh-sensenova-freeapi
+dsh plugin --profile desktop add /path/to/dsh-sensenova-freeapi
 ```
-
-Then configure SenseNova on the **Models** page:
-- Default credential env var: `SENSENOVA_API_KEY`
-- Default base URL: `https://token.sensenova.cn/v1`
 
 ---
 
@@ -59,13 +63,19 @@ Then configure SenseNova on the **Models** page:
 
 ### 1. Create a SenseNova account
 
-Sign up and log in at [https://platform.sensenova.cn/login](https://platform.sensenova.cn/login).
+Go to [https://platform.sensenova.cn/login](https://platform.sensenova.cn/login).
+
+> ⚠️ **Sign-up and login currently accept a phone number only — email is not supported.** There is no email-code entry in the console, so don't waste time on that field.
 
 ### 2. Issue multiple API keys from the console
 
-Open the console at [https://platform.sensenova.cn/console](https://platform.sensenova.cn/console), then create keys under **API Key management**. **Each account allows up to 20 keys.** Note that the allowance is metered **per account** (all keys in one account share a single bucket), but multiple keys in the same account significantly raise the number of "draws" — measured: 20 keys in one account succeed ~90% of the time vs 30% with a single key.
+Open [https://platform.sensenova.cn/console/keys](https://platform.sensenova.cn/console/keys) → **API Keys**.
 
-> 📷 Account configuration screen (where to issue multiple API keys):
+- **Up to 20 keys per account**
+- Quota is **per account**: every key inside one account shares the same bucket
+- Multiple keys buy you **more retry chances inside one bucket**, not more quota
+
+> 📷 Where to issue keys in the console:
 
 <p align="center">
   <img src="./docs/account-config-screenshot.png" alt="SenseNova account configuration screenshot" width="720">
@@ -73,76 +83,200 @@ Open the console at [https://platform.sensenova.cn/console](https://platform.sen
 
 ### 3. Register multiple accounts (4 recommended)
 
-SenseNova limits are **account- / endpoint-scoped** — multiple keys inside the *same* account share a single quota bucket. So spreading keys across **≥ 2 accounts** is what actually bypasses the single-account bottleneck.
+Quota is **per account**, so spreading keys across **≥2 accounts** is the only way to escape a single-account bottleneck. Number of accounts = number of independent buckets.
 
-- **Accounts are the key lever**: each account owns an independent quota bucket, so account count = bucket count. Measured: 4 accounts × 20 keys = 4 independent buckets × 20 draw chances, lifting the success rate from ~30% (single key) to ~100%.
-- This plugin's running/blocked dual-list + account rotation is built exactly for the multi-account case.
+- **Recommended: 4 accounts × 20 keys each** (80 keys total)
+- The account count directly decides your **group pacing window** (see "Smart group gap" below)
 
-### 4. Account order: the plugin interleaves accounts automatically
+### 4. Import keys
 
-Configure accounts in any order — at rotation time the plugin re-sorts by the label's “slot → account” pair, producing a cross-account interleaved order:
+In the console panel click **Import to accounts**. Two formats are accepted:
 
 ```
-A1  B1  A2  B2  A3  B3  …  (i.e. 121212 alternating)
+# Format 1: per-account blocks
+1
+0:sk-xxxx
+1:sk-xxxx
+2:sk-xxxx
+
+# Format 2: one line per key
+1-0:sk-xxxx
+1-1:sk-xxxx
 ```
 
-This naturally staggers every key so rotation never spins inside one account, greatly lowering the chance of hitting a single account's ceiling.
+Label format: `account-slot` (e.g. `2-3` = the 3rd key of account 2), `Default` equals `1-0`.
 
-- **Recommended setup: 4 accounts × 20 keys each** (SenseNova allows up to 20 keys per account).
+Importing automatically runs **Smart group** once (4 keys per group per account). Click **Save** at the top to persist and activate.
 
-  Measured (2026-10 peak hour, 10 rounds):
+### 5. Pick a model
 
-  | Keys in one account | Success rate | Expected time |
-  |---|---|---|
-  | 1 key | 30% | 27.9s |
-  | 5 keys | 40% | 27.1s |
-  | 10 keys | 40% | 27.8s |
-  | 15 keys | 70% | 21.9s |
-  | **20 keys** | **90%** | **17.2s** |
+**The plugin no longer recommends models.** The reason is simple:
 
-  **The knee is at 15-20 keys**; 20 keys in one account ≈ 20 keys across accounts (90% vs 100%). With 20 keys per account, 4 accounts give 4 independent buckets × 20 chances — rarely failing even at peak.
+> Model performance swings violently by time of day (morning rush, evening rush and 3 a.m. are completely different), and every measurement burns real requests and real time — **the test window itself is a variable**. A recommendation table produced under those conditions only misleads you.
 
-### 5. Recommended models
+The correct approach: **pick whichever model you want, then tune the group gap with the panel** — it has **Smart group gap** and **Preview**, so you can see whether the rhythm fits.
 
-The following are taken from long-running measurements (2026-09), ordered by use case:
+Current model status (as of 2026-11):
 
-| Model | Capability / Notes | Rating |
-|---|---|---|
-| **`deepseek-v4-flash`** | **First choice.** DeepSeek V4 Flash (0731); only *slightly* slower than the official DeepSeek API at any time of day; low-cost, 1M context, thinking + tool-calling | ⭐⭐⭐⭐⭐ |
-| `sensenova-6.8-flash-lite` | `6.8-flash-lite` uses a lightweight dedicated quota pool, has **real vision** (the only reliable one for reading images/screenshots), and the fastest wall-clock (26.6× speedup) | ⭐⭐⭐⭐⭐ (vision first) |
-| `kimi-k3` | Moonshot flagship multimodal agent; native vision + 1M context; good for long-horizon coding and knowledge work | ⭐⭐⭐⭐ |
-| `glm-5.2` | Zhipu long-horizon model; **highest sustained throughput** (201% faster than `deepseek-flash`, 45% lower latency), but **no vision** (hallucinates on images) | ⭐⭐⭐⭐ (text/long-run) |
-| ⚠️ `deepseek-flash` (DeepSeek V4.1 Flash) | **Not recommended:** very slow at peak, and only reaches ≤ half the official API speed even off-peak | ❌ |
-
-> 💡 **Bottom line:** use `deepseek-v4-flash` for daily/code/agent work; `sensenova-6.8-flash-lite` when you need image understanding; `glm-5.2` for pure-text maximum throughput. **Avoid `deepseek-flash` (V4.1).**
-
-> 🔭 **Pairing recommendation (vision assist):** run the main model on `deepseek-v4-flash` (fast, stable, low-cost) and leave image recognition to the vision-assist plugin — install [`dsh-sensenova-vision-aid`](https://github.com/modesthub/dsh-sensenova-vision-aid), which spawns a child agent switched to the SenseNova vision model (`sensenova-6.8-flash-lite` → `deepseek-flash` → `kimi-k3` failover) and **reuses this plugin's key automatically** (default `reuseFreeapiCredentials=true`, no second key needed). **Best combination: `deepseek-v4-flash` for text/code/agent work + vision-aid for images — fast and reliable.**
+| Situation | Details |
+|---|---|
+| `deepseek-v4-flash` | **Being retired** (its chapter is gone from the new official docs). Stop relying on it. |
+| `deepseek-flash` (V4.1) | The **replacement** for `deepseek-v4-flash`. |
+| Latency | Author's personal impression: both are in the **10–20 s** range. Anecdotal, not a benchmark. |
+| `glm-5.3` | Zhipu's new flagship (coding / security). **Thinking is always on**, effort accepts only `low`/`high`/`max`. |
+| `sensenova-6.8-flash-lite` | Lightweight multimodal, best for reading images, 262K context. |
+| `sensenova-6.8-flash` | New multimodal agent model, 1M context, thinking always on. |
+| `kimi-k3` | Native multimodal, 1M context, good for long-horizon coding. |
+| `glm-5.2` | Superseded by 5.3; **kept registered** in the plugin (old configs keep working) and cleaned up in a later release. |
 
 ---
 
-## UI buttons at a glance
+## 🎛️ The console panel
 
-| Button | Location | What it does |
+The **SenseNova Console** page in settings is the heart of this plugin:
+
+### Accounts and groups (key grid)
+
+One row per account, one square per key, groups enclosed in numbered frames (`1`, `1′`, `1″`).
+
+| Action | How |
+|---|---|
+| **Change grouping** | Drag a group frame's **left/right edge** to move keys between adjacent groups |
+| **Group menu** | Click a group label → merge into neighbour, take the whole group out of rotation, delete |
+| **Account menu** | Click the account square at the row start → rename, delete |
+| **Add a key** | Click an empty slot → fill the API key below → **Add key** |
+| **Row-end +** | Turn trailing orphans into a new group, or split the last group |
+
+Each row reserves 20 slots and expands automatically. Orphan keys (yellow dashed) belong to the account but **do not participate in rotation**.
+
+### Preview
+
+Plays the **real rotation order** at speed: each key turns green (request in flight) then red (429), and after the **429 round budget** is exhausted it shows the host throw.
+
+Use it to check the ordering and that two rounds cover every key before you tune anything.
+
+### Smart group
+
+Re-slices every account into groups of **4** (a remainder forms its own group). **Runs automatically after import**, and can be redone manually anytime.
+
+> Why 4: probing only 4 keys per turn is the empirical value that avoids triggering **424** (the upstream circuit breaker for *consecutive* rate limits). Want more or fewer per group? Drag the frames.
+
+### Smart group gap
+
+Recommends the group pacing window from your **actual account count**:
+
+| Accounts | Recommended gap | (n−1) × gap |
 |---|---|---|
-| **Export all keys** | Import / export keys card | Pulls every account key (default included) into the text box as plain text |
-| **Import into accounts** | Same card | Parses the text and writes it as a **draft** (Save lights up; nothing is written until you save) |
-| **Clear box** | Same card | Empties the import / export text box |
-| **Refresh** | Top-right of the page title | Re-queries every account's credential state manually (fallback; normally automatic) |
-| **Clear all** | Right of the multi-account card title | After a second confirmation (within 3 s) **stages every extra account for removal**; press Save to delete accounts + unset their credentials. The default account is kept |
-| **Save / Reset** | Page bottom | Save all drafts (import, clear, edits) / discard unsaved changes |
+| 1 / 2 | 60s | 0 / 60s |
+| 3 | 30s | 60s |
+| 4 | 20s | 60s |
+| ≥5 | 20s (may lower manually) | ≥80s |
 
-> 🔒 Exported text contains **plaintext keys**: it is shown only in your local settings page, never uploaded or persisted by the plugin. Store it wherever you trust (a password manager is a good default).
+The invariant is `(accounts − 1) × gap ≥ 60s`: each account rests at least 60 seconds between two uses. The panel shows both the **recommendation** and the **manual lower bound** for your current account count.
+
+### Scheduling (fixed pacing)
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| **Scheduling mode** | fixed | ⚠️ Use only this. AIMD is unfinished. |
+| **Grouping shape** | one account per group | The alternative ("mixed accounts inside a group") favours throughput |
+| **Key gap inside a group** | 1000 ms | Wait before switching to the next key of the same account |
+| **Group pacing window** | 20000 ms | Minimum occupancy of one group per round |
+| **429 round budget** | 2 | How many full sweeps may fail before the host throw (1–10) |
+
+### Vision aid
+
+Three tools (`describe_image` / `describe_images` / `chat`) plus drag-and-drop auto-recognition. **Toggling applies immediately** — no save needed. Disabling it leaves the main conversation untouched.
+
+### Diagnostics / Current model
+
+Read-only blocks: run log (rate-limit / vision / all filters) and the current model's capabilities and full parameter table. They never take part in the save flow.
 
 ---
 
-## Key import / export (v0.2.1)
+## 🔄 Rotation (the core of v0.5)
 
-The settings page gains an **Import / export keys** card below the credentials block:
+The old version managed each key's phase with a "running / blocked dual-list" plus an external probe that revived keys from the blocked list — complex, with plenty of failure modes. v0.5 drops phase tracking entirely and drives everything by **pure pacing**.
 
-**Export** — click “Export all keys”: every account key (default included) is written as plain text into the box, in the same format as a hand-maintained key file:
+### How one round works
+
+With 4 accounts × 20 keys each × 5 groups of 4:
 
 ```
-# dsh-sensenova-freeapi key export — 2026-10-26T00:00:00.000Z
+acct1 group1(4 keys) → acct2 group1 → acct3 group1 → acct4 group1
+                 ↓ a finished group waits for the group pacing window
+acct1 group2(4 keys) → acct2 group2 → acct3 group2 → acct4 group2
+                 ↓
+... until every account has walked through all 5 groups
+```
+
+**Three layers of rules:**
+
+1. **Macro: cycle through accounts, never skip**
+   Every macro cycle advances one step per account, in order. Account 1 finishes before account 2 starts. Skipping would squeeze two uses of the same account together — and rate limits chain per account.
+
+2. **Micro: use that account's own group cursor**
+   Each account tracks "which group is next". Accounts with fewer groups reuse the same group; that is by design.
+
+3. **Inside the group: 4 keys in slot order**
+   key 1 → 429 → wait the **key gap** → key 2 → … → key 4.
+   Any success ends the group; four 429s also end it for this round.
+
+### How the pacing window works
+
+When a group finishes (success or four failures), the plugin records **when the group started** and requires that the group stay out of rotation until `startedAt + groupGapMs`.
+
+- If the round only took 2 seconds but the window is 20 seconds → **wait out the remaining 18**
+- While waiting, the cursor keeps moving to the next account's next group
+
+So by the time rotation **comes back to the same group of the same account**, at least
+
+$$(accounts - 1) \times groupGapMs$$
+
+has elapsed. With 4 accounts × 20 s that is **60 seconds** between two uses of the same account. This is the whole meaning of the group pacing window.
+
+### What happens after a 429
+
+| Situation | Action |
+|---|---|
+| The group still has untried keys | Wait the **key gap**, switch to the next key |
+| All 4 keys in the group failed | Account for it, take one macro step to the next account |
+| Every account's current group is unavailable | Wait for the earliest available group, clear the "tried this round" set, start the next round |
+| Round budget exhausted | Throw to the host with `pra = time until the earliest available group` |
+
+**Why this avoids 424**: 424 (`bili_throttle_terminal`) is upstream's circuit breaker for **consecutive** rate limits. Once tripped, switching keys or accounts does nothing — you can only wait out the probe cycle (~30 s). The old "on 429, switch key immediately" logic could fire a dozen requests within a few hundred milliseconds, which is exactly what trips it. Now each group sends at most 4 requests with multi-second gaps between groups, so the breaker never gets a chance.
+
+### ⚠️ About AIMD
+
+The **AIMD (adaptive)** mode in the panel is **not usable right now**: its "inflate the gap on every 429" logic shares state with fixed mode and the hydration is incomplete. **Use fixed pacing.** Please also don't enable it by editing the code — there will be no large updates in the near term.
+
+---
+
+## 👁️ Vision aid (merged)
+
+The old version required installing `dsh-sensenova-vision-aid` separately; two rotation domains competed for the same keys, so **the main conversation and vision requests rate-limited each other**.
+
+Vision is now built in:
+
+| Capability | Description |
+|---|---|
+| `describe_image` | Single-image understanding / OCR |
+| `describe_images` | Multiple images in one request |
+| `chat` | Plain text (connectivity check / fallback) |
+| Drag-and-drop auto-recognition | Images dropped into a text-only model are first converted to a "visual observation" text block |
+
+The key property: **vision requests share the same key pool, the same concurrency gate and the same group backoff as the main conversation.** Rate-limit events go to the same run log.
+
+**If you don't want it**: untick **Enable vision aid** in settings — effective immediately. Dragged images then go to the main model as-is (official vision models can see them; text-only models are rejected by the host), i.e. the same behaviour as having no vision plugin installed.
+
+---
+
+## 🔑 Key import / export
+
+**Export**: click **Export all keys** → every account's keys (including the default one) appear in the textbox as plaintext:
+
+```
+# dsh-sensenova-freeapi key export — 2026-11-12T00:00:00.000Z
 Default:sk-...
 
 账户2
@@ -150,167 +284,71 @@ Default:sk-...
 1:sk-...
 ```
 
-**Import** — paste that text (or your own `account N / index:key` or `label:key` lines) and click “Import into accounts”:
-Import **only stages a draft** — the page-level **Save** button lights up; pressing it writes the credentials and updates the account list (`accounts`).
+**Import**: paste the text → **Import to accounts** → **draft only** (the Save button lights up) → click **Save** to write credentials.
 
-- a label matching an existing account overwrites that key (structure unchanged)
-- a new label allocates a fresh `SENSENOVA_API_KEY_N` ref and appends an account
-- `Default` / `1-0` writes the default account
-- duplicate keys and malformed lines are skipped with an inline notice (other lines still import)
+- Same label as an existing account → overwrite that account's keys
+- New label → allocate a new credential-ref and append the account
+- Duplicate keys and malformed lines are skipped with a message (other lines still import)
+
+> 🔒 The exported text is **plaintext keys**: it is shown only in the local settings page; the plugin never uploads or persists it. Export goes through the host-only route `GET /api/sensenova/keysExport` (the client cannot read keys directly; the host resolves them).
 
 ---
 
-## 📊 Author’s hands-on ranking: time efficiency
+## UI buttons at a glance
 
-Subjective ranking after long-term real use — **time efficiency first**, not benchmarks:
-
-| Rank | Model | Time efficiency | Error rate | Best for |
-|---|---|---|---|---|
-| 🥇 **1** | `glm-5.2` | **Fastest** (most obvious on small tasks) | Higher (review complex work) | Small tasks, short Q&A, pure-text batches |
-| 🥈 **2** | `deepseek-v4-flash` | Fast | **Lower** | **Daily driver**: code, agents, long-horizon work |
-| 🥉 **3** | `deepseek-flash` | Slower (time utilisation still low) | Medium | **Night-time automation** (light throttling, can run slow) |
-
-> 💡 `glm-5.2` is very fast on small tasks but may make more mistakes; `deepseek-v4-flash` balances speed and correctness best, enough for everyday use; `deepseek-flash` has low daytime time utilisation but is solid for **overnight automation**.
-
-### This big update: winning back time efficiency for `deepseek-flash`
-
-The goal of this release is to **improve `deepseek-flash` time efficiency** — via **multiple accounts, many keys, and interleaved layout**, validated through many repeated test runs to find the highest time-utilisation configuration.
-
-Three levers, each solving a different problem:
-
-| Lever | Effect | What it solves |
+| Button | Location | Purpose |
 |---|---|---|
-| **Account count** | More quota (each account is an independent bucket) | Fixes throttling **at the source** |
-| **Key count** | Faster “draws” (many quick retries after a 429) | Eases throttling **via key switching** |
-| **Key layout** | Better distribution (interleaving covers several buckets in the first few tries) | **Same attempts, more quota covered** |
-
-> See “Why it runs stably” and “Rotation” below: 20 keys in one account reach 90% (a single key only 30%); interleaved layout 72% vs sequential 50%.
-
----
-
-## Core idea: design around throttling as a norm
-
-SenseNova imposes **TPM / RPM concurrency and quota limits** per key, and a burst over the limit returns `429`. Most plugins just retry, which collapses into a **positive-feedback deadlock** under sustained throttling: the counter only resets on 2xx → short-circuiting yields zero success → the counter never resets → short-circuit never lifts → the process must be restarted.
-
-This plugin flips the thinking: **throttling is not an accident, it is the steady state.** Two explicit lists manage the state of every API key:
-
-### Running / Blocked dual-list state machine
-
-<p align="center">
-  <img src="./docs/state-machine.en.png" alt="Running / Blocked dual-list state machine: after kickThreshold consecutive tpm throttles a key leaves the running list for the blocked list; the external scheduler probes with a minimal request, re-appends to the running tail on success, probing every 3s" width="900">
-</p>
-
-Three non-negotiable properties (the essential difference from the legacy whole-pool short-circuit):
-
-1. **Floor** — when only 1 key remains in running, it is never kicked ⇒ the pool never empties and agent requests always go out.
-2. **Borrow** — when running candidates are all excluded, borrow the *longest-blocked* key temporarily (**without changing its phase**).
-3. **Recovery decoupled from requests** — a blocked key's phase is decided **only by probe results**, never polluted by "zero success", so it can be revived at any time. **This is what roots out the old deadlock.**
-
-> Why probing must exist: agent requests only ever target running keys — a blocked key is never hit. Unless someone probes it, it can never recover. The scheduler probes once every `probeInitialMs` (default 3s, the same order as the request-bucket refill cycle) with a minimal request, and revives the key on success.
-
----
-
-## Rotation: retry in place first, then switch keys
-
-**Full 429 handling pipeline**:
-
-1. **In-plugin retry in place** — wait on the same key for `deepseek-flash` 15s / `deepseek-v4-flash` 10s, at most once. On success: continue, no key switch, no log noise.
-2. **Key rotation** — if it still fails and `quotaRotation=true` (recommended), scan the **running list** round-robin from the position after the last-used key, skipping keys already tried in this request (`exclude`). This avoids the legacy "first two ping-pong, key #3+ never used" bug.
-3. **Borrow from blocked** — when all running candidates are excluded, borrow the *longest-blocked* key temporarily (**without changing its phase**), so a round can still try every key.
-4. **Throw to host** — only when every key fails (exponential backoff 15-19s, up to 24 retries).
-
-**Measured comparison (6 forced-429 rounds, deepseek-flash / 80 keys / 24k tokens)**
-
-| Strategy | Success | Avg time (success) | Range |
-|---|---|---|---|
-| **`quotaRotation=true`** (15s retry, then key rotation) | **6/6 (100%)** | **27.9s** | **25.9-28.7s** |
-| `quotaRotation=false` (15s retry, no key switch) | 4/6 (67%) | 36.9s | 27.4-46.4s (2 failures at 50s) |
-
-> Why rotation is faster: a key switch costs **0.2s each** (2-4 keys usually hit), while host backoff costs **17s per retry**. Even with more 429s, rotation stays at "15s wait + 12-15s generation" ≈ 28s; without rotation you can only wait for host backoff — two retries already cost 45-50s, or fail outright.
-
-**Rotation order (auto-interleaved since v0.2.6)**: when labels look like `account-slot` (`Default` counts as `1-0`), the plugin sorts by **(slot, account)** before rotating: `1-0 → 2-0 → 3-0 → 4-0 → 1-1 → 2-1 …`. The first 4 attempts therefore cover **4 independent quota buckets**, whereas a config-ordered list (all 20 keys of one account first) spends its first 19 attempts in a single bucket. Measured over 18 rounds (20-attempt cap): **interleaved 72% vs sequential 50%** success; on throttled rounds interleaved needed 10 attempts vs 16. Labels outside this format keep the configured order.
-
-**States and throttle classification**:
-
-- Only **tpm-type 429s** accumulate consecutive strikes; after `kickThreshold` (default 2) the key is kicked into the blocked list. `rpm` / `rate` throttles are recorded but never kick (their buckets heal in seconds; kicking only loses prompt cache).
-- **Floor** — when only 1 key remains in running, it is never kicked; the pool never empties and agent requests always go out.
-- **401 (invalid credential)** — permanently disabled and removed from the pool, regardless of `quotaRotation`.
-- **Session stickiness** — after a rotation the session sticks to the new key (protects the server-side prompt cache); a successful request clears stickiness so the round-robin cursor drives the next pick.
-- **Probe limitation** — the blocked-key probe is a minimal request (`max_tokens: 1`, thinking off), so it only reflects the request-count bucket, not full TPM recovery of large requests; real availability of large requests is judged by the agent request itself.
-
----
-
-## Why it "runs stably over the long term"
-
-None of the key parameters are guesses; they were **calibrated in long-running measurement**:
-
-| Measured item | Conclusion | Basis |
-|---|---|---|
-| 429 order | **In-plugin retry once first, then switch keys** (deepseek-flash 15s / v4-flash 10s) | 6 forced-429 rounds: 100% vs 67% success, 27.9s vs 36.9s |
-| `quotaRotation` | **On** (key switching is a cheap lottery: 0.2s per key) | Same test: without it the host backs off 17s per retry, hitting 45-50s after two rounds |
-| Keys per account | 20 keys reach **90%** success (single key 30%); knee at 15-20 | 10 rounds × 5 levels, peak hour |
-| Pool capacity | **100** (fits 4 accounts × 20 keys) | 2026-10 expansion measurement |
-| Probe interval | **Fixed 3s** (`probeBackoffFactor=1`, no growth) | Tightened: recovers blocked keys faster |
-| Probe scheduling | At most 1 key probed per tick (avoid probe-induced bursts) | by design |
-| Dual-list state machine | Replaces the whole-pool-saturation positive-feedback deadlock | refactor |
-| Wrap-around rotation fix | After an exclusion, wrap from the next position | 9265 logged 429s |
-| Retry-After cap | raised to `60_000ms` (original 3000ms mismatched the TPM 60s window) | long-run |
-| Queue timeout | default 60s, aligned with the TPM window | design D4/D6 |
-
----
-
-## Feature overview
-
-### 🧠 Dual-list key pool (running / blocked)
-- Pool-level singleton, shared across sessions: a key's quota is a global property and must not be session-isolated.
-- Consecutive-throttle kick-out, floor-never-empty, longest-blocked borrowing, probe recovery, fixed 3s probe — all configurable.
-- Each key's state (phase, strikes, blockedSince, probeAttempts) is read-only in the settings page.
-
-### 🔄 Rotation
-- Default account + extra accounts, same base URL.
-- Wrap-around rotation + sticky key-switch on quota-type 429s + permanent disable on 401.
-- A disabled key auto-recovers when its credential changes.
-
-### 📋 Error log table (read-only diagnostic block)
-- Every throttle becomes a structured event, written asynchronously — **never blocks, never throws**.
-- Fields: `time / model / error.code / account fingerprint / retryFloorMs / probeHits / poolRunning / poolBlocked / rotated / attempt`.
-- Keys live only in memory; logs write only **sha256 fingerprints**; raw keys never touch disk or leave the machine.
-
-### 📊 "Current model + all parameters" panel (read-only visualization)
-- Answers: **which model am I using? what does it support? which parameters can I change?**
-- Sourced from the host's actual parsing plus multiple measurement rounds.
-
----
-
-### 🔑 Key import / export (v0.2.1)
-- **Export**: pull every account key (default included) into the text box in `account N` groups — local only, never uploaded.
-- **Import**: paste `account N + index:key` groups or single `label:key` lines → **staged as a draft** (the Save button lights up); press Save to actually write the credentials and update accounts. A label matching an existing account overwrites that key.
-- Export goes through the host-only route `GET /api/sensenova/keysExport` (the client never sees plaintext); import writes the credentials store and updates `accounts` directly.
-- **Clear**: “Clear box” empties the import/export text; the accounts card gains “Clear all” — after a second confirmation the extra accounts are **staged for removal**; press Save to actually delete the accounts and their credentials (the default account is kept).
+| **Reset / Save** | Right of the page title | Discard unsaved edits / save all drafts |
+| **Refresh** | Right of the title | Force re-read of every credential state (use it when the grid looks off after import) |
+| **Clear all** | Right of the accounts header | After a second confirmation, stage removal of every extra account; takes effect on Save |
+| **Preview** (红/绿) | Top of the group editor | Play two rounds in real order, fast |
+| **Smart group** | Same | Re-slice each account into groups of 4 |
+| **Smart group gap** | Scheduling card | Write the recommended gap for your account count |
+| **Export all keys / Import to accounts / Clear box** | Import/export card | See above |
+| **Refresh** (diagnostics) | Diagnostics card | Fetch recent run log entries |
 
 ---
 
 ## Configuration
 
-| Field | Type | Default | Description |
-| --- | --- | --- | --- |
-| `apiBase` | string | `https://token.sensenova.cn/v1` | shared base URL for all accounts |
-| `apiKeyEnv` | credential-ref | `SENSENOVA_API_KEY` | credential ref for the default account |
-| `accounts[]` | array | `[]` | extra accounts: `{ id, label, apiKeyEnv }` |
-| `activeAccount` | string | `""` | preferred account id; empty = auto / first usable |
-| `quotaRotation` | bool | true (recommended) | cross-account key switch on quota-429 (2026-10: rotation is "cheap lottery"; 20-key rotation succeeds ~90%, far better than hard waiting) |
-| `concurrency` | int | 1 | per-key concurrency gate (FIFO queue above) |
-| `queueTimeoutMs` | int | 60000 | queueing wait cap |
-| `poolPolicy.kickThreshold` | int | 2 | TPM throttles before a key is kicked out of running |
-| `poolPolicy.probeInitialMs` | int | 3000 | probe a blocked key every 3s (2026-10: faster recovery) |
-| `poolPolicy.probeBackoffFactor` | int | 1 | probe backoff multiplier (1 = fixed interval) |
-| `poolPolicy.probeMaxMs` | int | 3000 | probe interval cap (fixed 3s) |
-| `poolPolicy.capacity` | int | 100 | pool capacity cap (100 slots = 4 accounts × 20 keys) |
-| `connectRetry.maxRetries` | int | 1 | in-plugin retries after a 429 (default 1; avoids host 16-19s backoff) |
-| `connectRetry.waitMs` | int | model-based | deepseek-flash 15s / deepseek-v4-flash 10s; `modelWaitMs` overrides |
-| `errorLog` | bool | true | whether to record throttle events |
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `apiBase` | string | `https://token.sensenova.cn/v1` | Base URL shared by all accounts |
+| `apiKeyEnv` | credential-ref | `SENSENOVA_API_KEY` | Credential ref of the default account |
+| `accounts[]` | array | `[]` | Extra accounts: `{ id, label, apiKeyEnv }` |
+| `activeAccount` | string | `""` | Preferred account id; empty = automatic |
+| `quotaRotation` | bool | `true` | Rotate keys on quota-type 429 (keep on) |
+| `concurrency` | int | `1` | Per-key concurrency limit (FIFO queue beyond it) |
+| `queueTimeoutMs` | int | `60000` | Queue wait ceiling |
+| `errorLog` | bool | `true` | Write rate-limit events to the run log |
+| `scheduling.mode` | enum | `fixed` | ⚠️ Use `fixed` only; `adaptive` (AIMD) is unfinished |
+| `scheduling.grouping` | enum | `by-account` | One account per group / mixed accounts per group |
+| `scheduling.groups[]` | array | `[]` | Per-account split `{ account, sizes[], gaps[] }` |
+| `scheduling.keyGapMs` | int | `1000` | Wait between keys inside a group |
+| `scheduling.groupGapMs` | int | `20000` | Group pacing window (min occupancy per group) |
+| `scheduling.roundBudget` | int | `2` | Full sweeps before throwing to the host |
+| `vision.enabled` | bool | `true` | Vision master switch (immediate) |
+| `vision.modelChain` | string | `sensenova-6.8-flash-lite,deepseek-flash,kimi-k3` | Vision failover chain |
+| `vision.bridgeMode` | enum | `on` | Drag-image bridge: `on` / `auto` / `off` |
+| `poolPolicy.capacity` | int | `100` | Key pool capacity |
 
-> API keys are always stored through the DSH credentials service — **never written to logs, never sent to the model**.
+> API keys are always stored through the DSH credentials service: **never logged, never sent to a model**.
+
+---
+
+## Tuning guide (instead of model recommendations)
+
+Since model performance varies by time of day, **the only reliable approach is to measure it yourself**:
+
+1. Run **Smart group** — 4 keys per group per account
+2. Click **Smart group gap** — write the recommended value for your account count
+3. Click **Preview** — confirm two rounds cover every key and the account rotation is coherent
+4. Use it for a while and watch the rate-limit log
+   - 429s are dense → raise the group gap (try +5 s or +10 s)
+   - Few 429s but slow responses → the gap may be lowered slightly
+5. **Key gap inside a group**: default 1000 ms. Lower it to rotate faster; 0 means four back-to-back requests, which the gateway may treat as a burst
+
+Every request logs its pacing parameters: `schedMode` / `schedKeyGapMs` / `schedGroupGapMs` / `schedWaitMs` (actual wait) / `schedStep` (which key in the group). Check them under **Diagnostics → Run log** to confirm the real rhythm matches your settings.
 
 ---
 
@@ -325,22 +363,22 @@ pnpm test         # node --import tsx --test tests/**/*.test.ts
 
 ---
 
----
-
 ## Changelog
 
-Oldest → newest. See “Rotation” and “Why it runs stably” above for the mechanics.
+Oldest → newest.
 
-- 🎉 **v0.2.0**: 429 pipeline rework (in-place retry first / per-model wait) + capacity 100 + fixed 3 s probe + multi-account 20-key measurement docs.
+- 🎉 **v0.2.0**: 429 pipeline rework (in-place retry first / per-model wait) + capacity 100 + multi-account 20-key measurements.
 - 🎯 **v0.2.1**: key import / export (host-only export route + settings import panel).
-- 🛠️ **Fixed in v0.2.2**: importing new accounts no longer reports a false “write failed” — the old code judged by a `describe` round-trip before the new ref existed in the settings snapshot. It now trusts `credentials.set` and refreshes state once accounts are persisted.
-- 🛠️ **Fixed in v0.2.3**: bulk import no longer freezes the page — the host broadcasts `credentials/reference-updated` per key, and the old code re-described **all** refs after every write (80 keys → 80 full queries). Event handling is now debounced to 200 ms, the import loop suspends refreshes entirely and does a single describe at the end, and a “settings not ready” guard prevents an import from overwriting the existing account list.
-- 🛠️ **Fixed in v0.2.4**: (1) credential-state queries are now **batched (25 refs per call)** — describing 80+ refs in one go was rejected/timed out, which surfaced as “80 accounts · 0 configured”; (2) import is now a **draft flow** (Save button lights up, nothing is written until you save); (3) a manual **Refresh** button was added at the top.
-- 🧹 **v0.2.5**: added “Clear all accounts” and “Clear box”. Clearing is **staged**: after a second click within 3 s the rows disappear and Save lights up; pressing Save deletes the accounts and unsets their credentials. “Reset” undoes it.
-- ⚡ **v0.2.6**: rotation order is now **interleaved at runtime** (sorted by the label's “slot → account” pair). Sequential orders produced by bulk import no longer hurt throughput — **no need to re-import existing configs**. Measured: 72% vs 50% success; on throttled rounds 10 vs 16 attempts.
-- 🩺 **v0.2.7**: (1) key pool status indicator (current key / next key dimmed / pool counts + a flash animation on 429 rotation); (2) account list collapses when there are more than 8; (3) seed diagnostics warn when the configured account count disagrees with the pool size — pinpoints the “install/import without restart” ordering race.
-
-> 🐛 **Fixed in v0.2.8 — “80 accounts but stuck on Default”**: the root cause was a lost `quotaRotation` config falling back to its `false` default, so 429s neither switched keys nor reported pool state. Fixes: (1) the flag now **defaults to on** (only an explicit `false` disables it), matching `errorLog` semantics; (2) pool state is reported **unconditionally** on 429; (3) the error log gained a `quotaRotation` field so “switch is off” is distinguishable from “no keys to switch to”.
+- 🛠️ **Fixed in v0.2.2**: importing new accounts no longer reports a false "write failed" — now trusts `credentials.set`.
+- 🛠️ **Fixed in v0.2.3**: bulk import froze the page — credential broadcasts debounced to 200 ms, refresh suspended during the import loop.
+- 🛠️ **Fixed in v0.2.4**: credential-state queries batched (25 per call) + draft-based import + manual refresh button.
+- 🧹 **v0.2.5**: clear-all-accounts / clear-box (staged, second confirmation).
+- ⚡ **v0.2.6**: rotation order auto-interleaved at runtime (sorted by label's slot → account).
+- 🩺 **v0.2.7**: key pool status indicator + collapsible account list + pool seed diagnostics.
+- 🐛 **v0.2.8**: `quotaRotation` defaults to on + unconditional pool-state reporting on 429 (fixes "80 accounts stuck on Default").
+- 🎛️ **v0.2.9**: wired the `connectRetry` config entry (in-place 429 wait can finally be turned off).
+- 🚀 **v0.5.0**: **rotation rewritten** — account-by-account cycling with 4 keys per group plus group pacing, replacing the running/blocked dual-list state machine; brand-new console panel (draggable key grid, Smart group, Smart group gap, Preview, 429 round budget); **vision aid merged** (three tools + drag bridge, sharing the key pool); live request flashing; key import/export reworked.
+- 🔧 **v0.5.0+**: added `sensenova-6.8-flash` and `glm-5.3` (thinking always on, efforts limited to low/high/max); `glm-5.2` and `deepseek-v4-flash` stay registered (retired models are kept until a later cleanup).
 
 ---
 
